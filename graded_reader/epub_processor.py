@@ -3,13 +3,15 @@ EPUB processing: read an input EPUB, annotate Chinese text with pinyin
 and English translations, and write a new EPUB.
 """
 
-import copy
 import logging
 import re
+import warnings
 from pathlib import Path
 
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag, XMLParsedAsHTMLWarning
 from ebooklib import epub
+
+warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 
 from .chinese_processing import annotate_text, contains_chinese
 from .translator import translate_text
@@ -115,9 +117,25 @@ def process_epub(
         # Link our CSS to this chapter
         item.add_item(css_item)
 
+    # Fix TOC entries that may have None uid (ebooklib read/write roundtrip issue)
+    _fix_toc_uids(book.toc)
+
     logger.info(f'Writing output EPUB: {output_path}')
     epub.write_epub(output_path, book, {})
     logger.info('Done!')
+
+
+def _fix_toc_uids(toc, prefix='toc') -> None:
+    """Ensure all TOC Link entries have a non-None uid."""
+    for i, item in enumerate(toc):
+        if isinstance(item, tuple):
+            # Section: (Section, [children])
+            section, children = item
+            if hasattr(section, 'uid') and section.uid is None:
+                section.uid = f'{prefix}_{i}'
+            _fix_toc_uids(children, prefix=f'{prefix}_{i}')
+        elif hasattr(item, 'uid') and item.uid is None:
+            item.uid = f'{prefix}_{i}'
 
 
 def _process_html_content(

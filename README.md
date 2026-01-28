@@ -29,6 +29,16 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Option A: Web UI (easiest — drag & drop)
+
+```bash
+python web_app.py
+```
+
+Open http://localhost:5000 in your browser, drag an EPUB file onto the page, pick your options, and click Convert. The graded reader EPUB downloads automatically.
+
+### Option B: Command line
+
 ```bash
 # Full conversion: pinyin + English translation
 python convert.py book.epub
@@ -47,6 +57,13 @@ python convert.py book.epub --target ja
 
 # Verbose logging
 python convert.py book.epub -v
+```
+
+### Quick test with sample data
+
+```bash
+python create_sample.py          # creates sample_chinese.epub (3 short chapters)
+python convert.py sample_chinese.epub --pinyin-only   # fast test, no API calls
 ```
 
 ## Output Format
@@ -79,6 +96,8 @@ For best results on Kindle:
 ```
 Chinese-books/
 ├── convert.py                      # CLI entry point
+├── web_app.py                      # Web UI (drag & drop)
+├── create_sample.py                # Generate a test EPUB
 ├── requirements.txt                # Python dependencies
 ├── README.md
 └── graded_reader/
@@ -98,3 +117,4 @@ Chinese-books/
 | [deep-translator](https://github.com/nidhaloff/deep-translator) | Translation via Google Translate (free) |
 | [beautifulsoup4](https://www.crummy.com/software/BeautifulSoup/) | HTML parsing and manipulation |
 | [lxml](https://lxml.de/) | Fast HTML/XML parser backend |
+| [flask](https://flask.palletsprojects.com/) | Web UI for drag-and-drop upload |
