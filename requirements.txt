@@ -1,0 +1,7 @@
+ebooklib>=0.18
+jieba>=0.42.1
+pypinyin>=0.51.0
+deep-translator>=1.11.4
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+flask>=3.0.0
