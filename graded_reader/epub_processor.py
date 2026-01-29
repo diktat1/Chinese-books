@@ -228,7 +228,20 @@ def _process_html_content(
     Process a single HTML document: annotate Chinese text nodes with
     pinyin and insert English translations after Chinese paragraphs.
     """
-    soup = BeautifulSoup(html, 'lxml')
+    # Preserve original XML declaration and DOCTYPE
+    xml_decl = ''
+    doctype = ''
+    if html.strip().startswith('<?xml'):
+        end_decl = html.find('?>') + 2
+        xml_decl = html[:end_decl]
+        html = html[end_decl:].strip()
+    if html.strip().upper().startswith('<!DOCTYPE'):
+        end_doctype = html.find('>') + 1
+        doctype = html[:end_doctype]
+        html = html[end_doctype:].strip()
+
+    # Use html.parser to avoid lxml rewriting the document structure
+    soup = BeautifulSoup(html, 'html.parser')
 
     # Inject our CSS link into <head>
     head = soup.find('head')
@@ -263,12 +276,22 @@ def _process_html_content(
                 trans_p.string = translation
                 block.insert_after(trans_p)
 
-    # Return as string, preserving the XML declaration if present
+    # Return as string
     result = str(soup)
 
-    # Ensure we have proper XHTML if the original was XHTML
-    if 'xmlns' in html and 'xmlns' not in result:
+    # Ensure we have proper XHTML namespace
+    if 'xmlns' not in result:
         result = result.replace('<html', '<html xmlns="http://www.w3.org/1999/xhtml"', 1)
+
+    # Restore XML declaration and DOCTYPE
+    if xml_decl or doctype:
+        parts = []
+        if xml_decl:
+            parts.append(xml_decl)
+        if doctype:
+            parts.append(doctype)
+        parts.append(result)
+        result = '\n'.join(parts)
 
     return result
 
