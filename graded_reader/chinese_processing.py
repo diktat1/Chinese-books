@@ -58,25 +58,49 @@ def word_to_ruby_html(word: str) -> str:
     return ''.join(result)
 
 
-def annotate_text(text: str) -> str:
+def annotate_text(text: str, word_spacing: bool = False) -> str:
     """
     Take a plain Chinese text string and return HTML with ruby pinyin
     annotations above each Chinese character.
 
     Non-Chinese text (punctuation, numbers, Latin) is left unchanged.
+
+    Args:
+        text: The text to annotate.
+        word_spacing: If True, adds spaces between Chinese words to help
+                      e-readers recognize word boundaries for dictionary lookup.
     """
     if not contains_chinese(text):
         return text
 
     words = segment_text(text)
-    return ''.join(word_to_ruby_html(w) for w in words)
+
+    if not word_spacing:
+        return ''.join(word_to_ruby_html(w) for w in words)
+
+    # With word spacing: add space between consecutive Chinese words
+    result = []
+    prev_was_chinese = False
+    for word in words:
+        word_is_chinese = contains_chinese(word)
+        # Add space before this word if both previous and current are Chinese
+        if prev_was_chinese and word_is_chinese:
+            result.append(' ')
+        result.append(word_to_ruby_html(word))
+        prev_was_chinese = word_is_chinese
+
+    return ''.join(result)
 
 
-def annotate_paragraph(paragraph_text: str) -> str:
+def annotate_paragraph(paragraph_text: str, word_spacing: bool = False) -> str:
     """
     Annotate an entire paragraph. Splits on newlines to preserve
     line structure, annotates each line, then rejoins.
+
+    Args:
+        paragraph_text: The paragraph text to annotate.
+        word_spacing: If True, adds spaces between Chinese words.
     """
     lines = paragraph_text.split('\n')
-    annotated_lines = [annotate_text(line) for line in lines]
+    annotated_lines = [annotate_text(line, word_spacing=word_spacing) for line in lines]
     return '\n'.join(annotated_lines)
