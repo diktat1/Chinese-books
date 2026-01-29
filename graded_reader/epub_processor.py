@@ -159,9 +159,11 @@ def process_epub(
             item.set_id(f'item_{item_name}')
             logger.debug(f'Fixed missing ID for: {item.get_name()}')
 
+    # Ensure EPUB3 navigation document exists (required for EPUB3 compliance)
+    _ensure_nav_document(book)
+
     logger.info(f'Writing output EPUB: {output_path}')
-    # Use default spine=True to include all items
-    epub.write_epub(output_path, book, {'spine': True})
+    epub.write_epub(output_path, book)
     logger.info('Done!')
 
 
@@ -176,6 +178,42 @@ def _fix_toc_uids(toc, prefix='toc') -> None:
             _fix_toc_uids(children, prefix=f'{prefix}_{i}')
         elif hasattr(item, 'uid') and item.uid is None:
             item.uid = f'{prefix}_{i}'
+
+
+def _ensure_nav_document(book: epub.EpubBook) -> None:
+    """
+    Ensure the book has an EPUB3 navigation document.
+
+    EPUB3 requires a nav document with the 'nav' property in the manifest.
+    If the book was created from an EPUB2 file (which only has NCX),
+    we need to create the nav document.
+    """
+    # Check if nav document already exists
+    for item in book.get_items():
+        if isinstance(item, epub.EpubNav):
+            logger.debug('Nav document already exists')
+            return
+        # Also check for nav property in item properties
+        if hasattr(item, 'properties') and item.properties and 'nav' in item.properties:
+            logger.debug('Item with nav property already exists')
+            return
+
+    logger.info('Creating EPUB3 navigation document')
+
+    # Create the nav document
+    nav = epub.EpubNav()
+    nav.set_id('nav')
+    nav.file_name = 'nav.xhtml'
+
+    # Add nav to the book
+    book.add_item(nav)
+
+    # Add nav to spine (at the beginning, hidden)
+    # First, get current spine
+    current_spine = list(book.spine) if book.spine else []
+
+    # Insert nav at the beginning with linear='no' to hide it from reading order
+    book.spine = [('nav', 'no')] + current_spine
 
 
 def _process_html_content(
