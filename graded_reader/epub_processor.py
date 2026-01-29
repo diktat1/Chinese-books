@@ -110,7 +110,13 @@ def process_epub(
         word_spacing: Whether to add spaces between Chinese words for dictionary lookup.
     """
     logger.info(f'Reading EPUB: {input_path}')
-    book = epub.read_epub(input_path)
+    book = epub.read_epub(input_path, options={'ignore_ncx': True})
+
+    # Log all items found in the EPUB for debugging
+    all_items = list(book.get_items())
+    logger.debug(f'Found {len(all_items)} items in EPUB')
+    for item in all_items:
+        logger.debug(f'  - {item.get_name()} (type: {item.get_type()})')
 
     # Add our custom CSS stylesheet
     css_item = epub.EpubItem(
@@ -145,8 +151,17 @@ def process_epub(
     # Fix TOC entries that may have None uid (ebooklib read/write roundtrip issue)
     _fix_toc_uids(book.toc)
 
+    # Ensure all items have proper IDs to be included in the manifest
+    for item in book.get_items():
+        if item.get_id() is None:
+            # Generate an ID from the filename
+            item_name = item.get_name().replace('/', '_').replace('.', '_')
+            item.set_id(f'item_{item_name}')
+            logger.debug(f'Fixed missing ID for: {item.get_name()}')
+
     logger.info(f'Writing output EPUB: {output_path}')
-    epub.write_epub(output_path, book, {})
+    # Use default spine=True to include all items
+    epub.write_epub(output_path, book, {'spine': True})
     logger.info('Done!')
 
 
