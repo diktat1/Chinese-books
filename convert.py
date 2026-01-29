@@ -32,6 +32,7 @@ Examples:
   python convert.py book.epub --pinyin-only            # Only add pinyin, no translation
   python convert.py book.epub --translation-only       # Only add translation, no pinyin
   python convert.py book.epub --target ja              # Translate to Japanese instead of English
+  python convert.py book.epub --word-spacing           # Add spaces between words for Kindle lookup
         ''',
     )
 
@@ -59,6 +60,11 @@ Examples:
         '--target',
         default='en',
         help='Target language code for translation (default: en)',
+    )
+    parser.add_argument(
+        '--word-spacing',
+        action='store_true',
+        help='Add spaces between Chinese words for easier dictionary lookup on e-readers',
     )
     parser.add_argument(
         '-v', '--verbose',
@@ -104,6 +110,8 @@ Examples:
         mode_parts.append('pinyin')
     if add_translation:
         mode_parts.append(f'translation ({args.source} -> {args.target})')
+    if args.word_spacing:
+        mode_parts.append('word-spacing')
 
     print(f'Input:  {input_path}')
     print(f'Output: {output_path}')
@@ -117,6 +125,7 @@ Examples:
         add_translation=add_translation,
         translation_source=args.source,
         translation_target=args.target,
+        word_spacing=args.word_spacing,
     )
 
     print(f'\nOutput written to: {output_path}')

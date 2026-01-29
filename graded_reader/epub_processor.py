@@ -22,45 +22,67 @@ RUBY_CSS = '''
 /* Ruby annotation styling for pinyin */
 ruby {
     ruby-align: center;
+    -epub-ruby-position: over;
+    -webkit-ruby-position: before;
+    ruby-position: over;
 }
 
 rt {
-    font-size: 0.5em;
+    font-size: 0.45em;
     font-style: normal;
     font-weight: normal;
-    color: #555;
+    color: #888;
     ruby-align: center;
+    letter-spacing: 0.02em;
 }
 
 rp {
     display: none;
 }
 
-ruby {
-    -epub-ruby-position: over;
-    -webkit-ruby-position: before;
-    ruby-position: over;
-}
-
 /* Extra line height to accommodate pinyin above characters */
 body {
-    line-height: 2.0;
+    line-height: 2.2;
+    font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", serif;
 }
 
 p {
-    line-height: 2.0;
-    margin-bottom: 0.8em;
+    line-height: 2.2;
+    margin-bottom: 1em;
+    text-align: justify;
+}
+
+/* Headings */
+h1, h2, h3, h4, h5, h6 {
+    line-height: 2.2;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
 }
 
 /* English translation styling */
 .translation {
-    font-size: 0.85em;
+    font-size: 0.8em;
     color: #666;
     font-style: italic;
-    margin-top: 0.2em;
-    margin-bottom: 1em;
-    padding-left: 0.5em;
-    border-left: 2px solid #ddd;
+    margin-top: 0.3em;
+    margin-bottom: 1.2em;
+    padding: 0.5em 0.8em;
+    background-color: #f8f8f8;
+    border-left: 3px solid #ccc;
+    border-radius: 0 4px 4px 0;
+    font-family: Georgia, "Times New Roman", serif;
+}
+
+/* Dark mode support for e-readers that support it */
+@media (prefers-color-scheme: dark) {
+    rt {
+        color: #aaa;
+    }
+    .translation {
+        background-color: #2a2a2a;
+        color: #bbb;
+        border-left-color: #555;
+    }
 }
 '''
 
@@ -72,6 +94,7 @@ def process_epub(
     add_translation: bool = True,
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
+    word_spacing: bool = False,
 ) -> None:
     """
     Read an EPUB file, add pinyin annotations and/or English translations,
@@ -84,9 +107,16 @@ def process_epub(
         add_translation: Whether to add English translations after paragraphs.
         translation_source: Source language code for translation.
         translation_target: Target language code for translation.
+        word_spacing: Whether to add spaces between Chinese words for dictionary lookup.
     """
     logger.info(f'Reading EPUB: {input_path}')
-    book = epub.read_epub(input_path)
+    book = epub.read_epub(input_path, options={'ignore_ncx': True})
+
+    # Log all items found in the EPUB for debugging
+    all_items = list(book.get_items())
+    logger.debug(f'Found {len(all_items)} items in EPUB')
+    for item in all_items:
+        logger.debug(f'  - {item.get_name()} (type: {item.get_type()})')
 
     # Add our custom CSS stylesheet
     css_item = epub.EpubItem(
@@ -111,6 +141,7 @@ def process_epub(
             add_translation=add_translation,
             translation_source=translation_source,
             translation_target=translation_target,
+            word_spacing=word_spacing,
         )
         item.set_content(processed.encode('utf-8'))
 
@@ -120,8 +151,17 @@ def process_epub(
     # Fix TOC entries that may have None uid (ebooklib read/write roundtrip issue)
     _fix_toc_uids(book.toc)
 
+    # Ensure all items have proper IDs to be included in the manifest
+    for item in book.get_items():
+        if item.get_id() is None:
+            # Generate an ID from the filename
+            item_name = item.get_name().replace('/', '_').replace('.', '_')
+            item.set_id(f'item_{item_name}')
+            logger.debug(f'Fixed missing ID for: {item.get_name()}')
+
     logger.info(f'Writing output EPUB: {output_path}')
-    epub.write_epub(output_path, book, {})
+    # Use default spine=True to include all items
+    epub.write_epub(output_path, book, {'spine': True})
     logger.info('Done!')
 
 
@@ -144,6 +184,7 @@ def _process_html_content(
     add_translation: bool = True,
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
+    word_spacing: bool = False,
 ) -> str:
     """
     Process a single HTML document: annotate Chinese text nodes with
@@ -171,7 +212,7 @@ def _process_html_content(
             continue
 
         if add_pinyin:
-            _annotate_block(block, soup)
+            _annotate_block(block, soup, word_spacing=word_spacing)
 
         if add_translation and block.name == 'p':
             # Translate the original plain text (before pinyin was added)
@@ -194,7 +235,7 @@ def _process_html_content(
     return result
 
 
-def _annotate_block(block: Tag, soup: BeautifulSoup) -> None:
+def _annotate_block(block: Tag, soup: BeautifulSoup, word_spacing: bool = False) -> None:
     """
     Walk through the text nodes inside a block element and replace
     Chinese text with ruby-annotated HTML.
@@ -213,7 +254,7 @@ def _annotate_block(block: Tag, soup: BeautifulSoup) -> None:
         if not contains_chinese(original):
             continue
 
-        annotated_html = annotate_text(original)
+        annotated_html = annotate_text(original, word_spacing=word_spacing)
         if annotated_html == original:
             continue
 
