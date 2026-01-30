@@ -365,7 +365,15 @@ def _process_block_kindle_format(
     # Elements to insert after the block (in reverse order for insert_after)
     elements_to_insert = []
 
-    # Add translation paragraph (will be inserted last, so add first to list)
+    # Add pinyin paragraph first (will appear right after Chinese)
+    if add_pinyin:
+        pinyin_text = text_to_pinyin(plain_text)
+        pinyin_p = soup.new_tag('p')
+        pinyin_p['class'] = 'pinyin-text'
+        pinyin_p.string = pinyin_text
+        elements_to_insert.append(pinyin_p)
+
+    # Add translation paragraph (will appear after pinyin)
     if add_translation and block.name == 'p':
         translation = translate_text(
             plain_text, source=translation_source, target=translation_target
@@ -375,14 +383,6 @@ def _process_block_kindle_format(
             trans_p['class'] = 'translation'
             trans_p.string = translation
             elements_to_insert.append(trans_p)
-
-    # Add pinyin paragraph
-    if add_pinyin:
-        pinyin_text = text_to_pinyin(plain_text)
-        pinyin_p = soup.new_tag('p')
-        pinyin_p['class'] = 'pinyin-text'
-        pinyin_p.string = pinyin_text
-        elements_to_insert.append(pinyin_p)
 
     # Update the original block: replace content with word-spaced Chinese
     spaced_chinese = text_to_spaced_chinese(plain_text)
