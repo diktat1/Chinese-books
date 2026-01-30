@@ -201,9 +201,7 @@ def _ensure_nav_document(book: epub.EpubBook) -> None:
     logger.info('Creating EPUB3 navigation document')
 
     # Create the nav document
-    nav = epub.EpubNav()
-    nav.set_id('nav')
-    nav.file_name = 'nav.xhtml'
+    nav = epub.EpubNav(uid='nav', file_name='nav.xhtml')
 
     # Add nav to the book
     book.add_item(nav)
