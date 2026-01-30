@@ -386,6 +386,10 @@ def _process_block_kindle_format(
 
     # Update the original block: replace content with word-spaced Chinese
     spaced_chinese = text_to_spaced_chinese(plain_text)
+
+    # Store parent reference before clearing (clear() can sometimes orphan elements)
+    parent = block.parent
+
     block.clear()
     block['class'] = block.get('class', [])
     if isinstance(block['class'], str):
@@ -394,5 +398,7 @@ def _process_block_kindle_format(
     block.string = spaced_chinese
 
     # Insert elements after the block (in reverse order)
-    for elem in reversed(elements_to_insert):
-        block.insert_after(elem)
+    # Only if block still has a parent (some nested structures can cause issues)
+    if parent is not None and block.parent is not None:
+        for elem in reversed(elements_to_insert):
+            block.insert_after(elem)
