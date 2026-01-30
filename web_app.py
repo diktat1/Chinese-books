@@ -13,9 +13,15 @@ import tempfile
 import logging
 from pathlib import Path
 
-from flask import Flask, request, send_file, render_template_string
+from flask import Flask, request, send_file, render_template_string, jsonify
 
 from graded_reader.epub_processor import process_epub
+from graded_reader.calibre import (
+    is_calibre_installed,
+    get_calibre_version,
+    convert_epub_to_azw3,
+    CalibreNotFoundError,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -137,6 +143,28 @@ HTML_PAGE = '''
             color: #999;
             line-height: 1.5;
         }
+        .kindle-status {
+            font-size: 0.85em;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-top: 8px;
+            margin-bottom: 8px;
+        }
+        .kindle-status.available {
+            background: #d4edda;
+            color: #155724;
+        }
+        .kindle-status.missing {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .kindle-status a {
+            color: inherit;
+            font-weight: bold;
+        }
+        .options input:disabled + span {
+            color: #999;
+        }
     </style>
 </head>
 <body>
@@ -155,6 +183,8 @@ HTML_PAGE = '''
         <div class="options">
             <label><input type="checkbox" name="add_pinyin" checked> Add pinyin above characters</label>
             <label><input type="checkbox" name="add_translation" checked> Add English translation after paragraphs</label>
+            <label><input type="checkbox" name="kindle_output" id="kindleOutput"> <span>Output as AZW3 for Kindle</span></label>
+            <div class="kindle-status" id="kindleStatus"></div>
         </div>
 
         <button type="submit" id="convertBtn" disabled>Convert to Graded Reader</button>
@@ -165,7 +195,7 @@ HTML_PAGE = '''
     <p class="note">
         Pinyin-only conversion is fast (seconds). Adding translations takes longer
         because each paragraph is sent to Google Translate.<br>
-        For Kindle: convert the output EPUB to AZW3 using Calibre.
+        For Kindle: check "Output as AZW3" for direct Kindle support (requires Calibre).
     </p>
 </div>
 
@@ -176,6 +206,29 @@ const fileName = document.getElementById('fileName');
 const form = document.getElementById('uploadForm');
 const btn = document.getElementById('convertBtn');
 const status = document.getElementById('status');
+const kindleCheckbox = document.getElementById('kindleOutput');
+const kindleStatus = document.getElementById('kindleStatus');
+
+// Check Calibre availability on page load
+async function checkCalibre() {
+    try {
+        const resp = await fetch('/check-calibre');
+        const data = await resp.json();
+        if (data.available) {
+            kindleStatus.className = 'kindle-status available';
+            kindleStatus.textContent = 'Calibre detected: ' + data.version;
+        } else {
+            kindleStatus.className = 'kindle-status missing';
+            kindleStatus.innerHTML = 'Calibre not installed. <a href="https://calibre-ebook.com/download" target="_blank">Install Calibre</a> for AZW3 support.';
+            kindleCheckbox.disabled = true;
+        }
+    } catch (e) {
+        kindleStatus.className = 'kindle-status missing';
+        kindleStatus.textContent = 'Could not check Calibre status';
+        kindleCheckbox.disabled = true;
+    }
+}
+checkCalibre();
 
 dropZone.addEventListener('click', () => fileInput.click());
 
@@ -210,14 +263,17 @@ form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!fileInput.files.length) return;
 
+    const kindleOutput = kindleCheckbox.checked;
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
     formData.append('add_pinyin', form.querySelector('[name=add_pinyin]').checked);
     formData.append('add_translation', form.querySelector('[name=add_translation]').checked);
+    formData.append('kindle_output', kindleOutput);
 
     btn.disabled = true;
     status.className = 'status processing';
-    status.textContent = 'Converting... This may take a while if translation is enabled.';
+    const formatMsg = kindleOutput ? ' Converting to AZW3 for Kindle.' : '';
+    status.textContent = 'Converting... This may take a while if translation is enabled.' + formatMsg;
 
     try {
         const resp = await fetch('/convert', { method: 'POST', body: formData });
@@ -230,15 +286,17 @@ form.addEventListener('submit', async (e) => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         const origName = fileInput.files[0].name.replace('.epub', '');
+        const ext = kindleOutput ? '.azw3' : '.epub';
         a.href = url;
-        a.download = origName + '_graded.epub';
+        a.download = origName + '_graded' + ext;
         document.body.appendChild(a);
         a.click();
         a.remove();
         URL.revokeObjectURL(url);
 
         status.className = 'status done';
-        status.textContent = 'Conversion complete! Your download should start automatically.';
+        const formatDone = kindleOutput ? ' (AZW3 for Kindle)' : '';
+        status.textContent = 'Conversion complete!' + formatDone + ' Your download should start automatically.';
     } catch (err) {
         status.className = 'status error';
         status.textContent = 'Error: ' + err.message;
@@ -257,6 +315,17 @@ def index():
     return render_template_string(HTML_PAGE)
 
 
+@app.route('/check-calibre')
+def check_calibre():
+    """Check if Calibre is installed and return status."""
+    available = is_calibre_installed()
+    version = get_calibre_version() if available else None
+    return jsonify({
+        'available': available,
+        'version': version,
+    })
+
+
 @app.route('/convert', methods=['POST'])
 def convert():
     if 'file' not in request.files:
@@ -268,33 +337,54 @@ def convert():
 
     add_pinyin = request.form.get('add_pinyin', 'true') == 'true'
     add_translation = request.form.get('add_translation', 'true') == 'true'
+    kindle_output = request.form.get('kindle_output', 'false') == 'true'
 
     if not add_pinyin and not add_translation:
         return 'Select at least one option (pinyin or translation)', 400
 
+    if kindle_output and not is_calibre_installed():
+        return 'Calibre is not installed. Cannot convert to AZW3.', 400
+
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = os.path.join(tmpdir, 'input.epub')
-        output_path = os.path.join(tmpdir, 'output.epub')
+        epub_output_path = os.path.join(tmpdir, 'output.epub')
 
         file.save(input_path)
 
         try:
             process_epub(
                 input_path=input_path,
-                output_path=output_path,
+                output_path=epub_output_path,
                 add_pinyin=add_pinyin,
                 add_translation=add_translation,
             )
+
+            if kindle_output:
+                azw3_output_path = os.path.join(tmpdir, 'output.azw3')
+                convert_epub_to_azw3(
+                    epub_path=epub_output_path,
+                    azw3_path=azw3_output_path,
+                    keep_epub=False,
+                )
+                return send_file(
+                    azw3_output_path,
+                    as_attachment=True,
+                    download_name=file.filename.replace('.epub', '_graded.azw3'),
+                    mimetype='application/x-mobi8-ebook',
+                )
+            else:
+                return send_file(
+                    epub_output_path,
+                    as_attachment=True,
+                    download_name=file.filename.replace('.epub', '_graded.epub'),
+                    mimetype='application/epub+zip',
+                )
+
+        except CalibreNotFoundError as e:
+            return f'Calibre error: {e.message}', 500
         except Exception as e:
             logging.exception('Conversion failed')
             return f'Conversion failed: {e}', 500
-
-        return send_file(
-            output_path,
-            as_attachment=True,
-            download_name=file.filename.replace('.epub', '_graded.epub'),
-            mimetype='application/epub+zip',
-        )
 
 
 if __name__ == '__main__':

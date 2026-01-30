@@ -15,10 +15,16 @@ Usage:
 
 import argparse
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
 from graded_reader.epub_processor import process_epub
+from graded_reader.calibre import (
+    is_calibre_installed,
+    convert_epub_to_azw3,
+    CalibreNotFoundError,
+)
 
 
 def main():
@@ -33,6 +39,8 @@ Examples:
   python convert.py book.epub --translation-only       # Only add translation, no pinyin
   python convert.py book.epub --target ja              # Translate to Japanese instead of English
   python convert.py book.epub --word-spacing           # Add spaces between words for Kindle lookup
+  python convert.py book.epub --kindle                 # Output AZW3 for Kindle (requires Calibre)
+  python convert.py book.epub --kindle --no-keep-epub  # AZW3 only, delete intermediate EPUB
         ''',
     )
 
@@ -67,6 +75,24 @@ Examples:
         help='Add spaces between Chinese words for easier dictionary lookup on e-readers',
     )
     parser.add_argument(
+        '--kindle', '--azw3',
+        action='store_true',
+        dest='kindle',
+        help='Convert output to AZW3 format for Kindle (requires Calibre)',
+    )
+    parser.add_argument(
+        '--kindle-profile',
+        default='kindle_pw3',
+        choices=['kindle', 'kindle_dx', 'kindle_fire', 'kindle_oasis',
+                 'kindle_pw', 'kindle_pw3', 'kindle_scribe', 'kindle_voyage'],
+        help='Calibre output profile for Kindle conversion (default: kindle_pw3)',
+    )
+    parser.add_argument(
+        '--no-keep-epub',
+        action='store_true',
+        help='Delete the intermediate EPUB after AZW3 conversion',
+    )
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Enable verbose logging',
@@ -91,11 +117,28 @@ Examples:
     if input_path.suffix.lower() != '.epub':
         print(f'Warning: Input file does not have .epub extension: {input_path}', file=sys.stderr)
 
-    # Determine output path
-    if args.output:
-        output_path = Path(args.output)
+    # Check Calibre availability if --kindle is requested
+    if args.kindle and not is_calibre_installed():
+        error = CalibreNotFoundError()
+        print(f'Error: {error.message}', file=sys.stderr)
+        sys.exit(1)
+
+    # Determine output paths
+    if args.kindle:
+        # For AZW3 output, we need both an intermediate EPUB and final AZW3 path
+        if args.output:
+            azw3_path = Path(args.output)
+            if azw3_path.suffix.lower() != '.azw3':
+                azw3_path = azw3_path.with_suffix('.azw3')
+        else:
+            azw3_path = input_path.with_stem(input_path.stem + '_graded').with_suffix('.azw3')
+        epub_output_path = azw3_path.with_suffix('.epub')
+        output_path = epub_output_path  # process_epub writes to this
     else:
-        output_path = input_path.with_stem(input_path.stem + '_graded')
+        if args.output:
+            output_path = Path(args.output)
+        else:
+            output_path = input_path.with_stem(input_path.stem + '_graded')
 
     # Determine what to add
     add_pinyin = not args.translation_only
@@ -112,9 +155,14 @@ Examples:
         mode_parts.append(f'translation ({args.source} -> {args.target})')
     if args.word_spacing:
         mode_parts.append('word-spacing')
+    if args.kindle:
+        mode_parts.append(f'kindle ({args.kindle_profile})')
 
     print(f'Input:  {input_path}')
-    print(f'Output: {output_path}')
+    if args.kindle:
+        print(f'Output: {azw3_path} (AZW3 for Kindle)')
+    else:
+        print(f'Output: {output_path}')
     print(f'Mode:   {" + ".join(mode_parts)}')
     print()
 
@@ -128,8 +176,25 @@ Examples:
         word_spacing=args.word_spacing,
     )
 
-    print(f'\nOutput written to: {output_path}')
-    print('Tip: For Kindle, convert the output EPUB to AZW3 using Calibre for best ruby support.')
+    if args.kindle:
+        # Convert EPUB to AZW3
+        keep_epub = not args.no_keep_epub
+        try:
+            convert_epub_to_azw3(
+                epub_path=str(epub_output_path),
+                azw3_path=str(azw3_path),
+                output_profile=args.kindle_profile,
+                keep_epub=keep_epub,
+            )
+            print(f'\nKindle AZW3 written to: {azw3_path}')
+            if keep_epub:
+                print(f'Intermediate EPUB kept at: {epub_output_path}')
+        except subprocess.CalledProcessError as e:
+            print(f'Error: Calibre conversion failed: {e.stderr}', file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(f'\nOutput written to: {output_path}')
+        print('Tip: Use --kindle flag to automatically convert to AZW3 for Kindle.')
 
 
 if __name__ == '__main__':
