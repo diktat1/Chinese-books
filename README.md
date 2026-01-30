@@ -55,6 +55,12 @@ python convert.py book.epub --translation-only
 # Translate to a different language (e.g. Japanese)
 python convert.py book.epub --target ja
 
+# Output directly to AZW3 for Kindle (requires Calibre)
+python convert.py book.epub --kindle
+
+# AZW3 output, delete intermediate EPUB
+python convert.py book.epub --kindle --no-keep-epub
+
 # Verbose logging
 python convert.py book.epub -v
 ```
@@ -82,14 +88,46 @@ The output EPUB contains:
 - English translation appears below each paragraph in italic gray text
 - `<rp>` tags provide fallback for readers without ruby support: `你(nǐ)好(hǎo)`
 
-## Kindle Compatibility
+## Kindle / AZW3 Output
 
-For best results on Kindle:
+For Kindle, use the `--kindle` flag to automatically convert to AZW3 format. This requires [Calibre](https://calibre-ebook.com/) to be installed.
 
-1. **Convert to AZW3** (not MOBI) using [Calibre](https://calibre-ebook.com/) — MOBI does not support `<ruby>` tags
-2. The output EPUB uses vendor-prefixed CSS (`-epub-ruby-position`, `-webkit-ruby-position`) for maximum device compatibility
-3. Line height is set to 2.0 to prevent pinyin from overlapping the line above
-4. If ruby doesn't render, Kindle Paperwhite+ has a built-in pinyin mode: Settings > Language & Dictionaries > add Chinese keyboard > tap "Pinyin" while reading
+### Installing Calibre
+
+- **macOS**: Download from https://calibre-ebook.com/download_osx
+- **Windows**: Download from https://calibre-ebook.com/download_windows
+- **Linux**: `sudo apt install calibre` or download from https://calibre-ebook.com/download_linux
+
+### Usage
+
+```bash
+# Convert directly to AZW3 for Kindle
+python convert.py book.epub --kindle
+
+# Keep both EPUB and AZW3
+python convert.py book.epub --kindle
+
+# Delete intermediate EPUB, keep only AZW3
+python convert.py book.epub --kindle --no-keep-epub
+
+# Specify Kindle device profile
+python convert.py book.epub --kindle --kindle-profile kindle_oasis
+```
+
+Available Kindle profiles: `kindle`, `kindle_dx`, `kindle_fire`, `kindle_oasis`, `kindle_pw`, `kindle_pw3` (default), `kindle_scribe`, `kindle_voyage`
+
+The web UI will automatically detect Calibre and enable the AZW3 option if available.
+
+### Why AZW3?
+
+- **MOBI does not support `<ruby>` tags** — pinyin will display as `字(pinyin)` instead of above characters
+- **AZW3 (KF8)** properly renders ruby annotations with pinyin above each character
+- The converter uses vendor-prefixed CSS (`-epub-ruby-position`, `-webkit-ruby-position`) for maximum compatibility
+- Line height is set to 2.2 to prevent pinyin from overlapping the line above
+
+### Fallback
+
+If ruby doesn't render on older Kindles, Kindle Paperwhite+ has a built-in pinyin mode: Settings > Language & Dictionaries > add Chinese keyboard > tap "Pinyin" while reading
 
 ## Project Structure
 
@@ -102,6 +140,7 @@ Chinese-books/
 ├── README.md
 └── graded_reader/
     ├── __init__.py
+    ├── calibre.py                  # Calibre detection + EPUB-to-AZW3 conversion
     ├── chinese_processing.py       # Word segmentation + pinyin + ruby HTML
     ├── translator.py               # Chinese-to-English translation
     └── epub_processor.py           # EPUB read/write + HTML processing + CSS

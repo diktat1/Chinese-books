@@ -104,3 +104,98 @@ def annotate_paragraph(paragraph_text: str, word_spacing: bool = False) -> str:
     lines = paragraph_text.split('\n')
     annotated_lines = [annotate_text(line, word_spacing=word_spacing) for line in lines]
     return '\n'.join(annotated_lines)
+
+
+def _is_punctuation(text: str) -> bool:
+    """Check if text is only punctuation (Chinese or ASCII)."""
+    import string
+    cn_punct = '，。！？；：""''【】《》（）、·…—'
+    all_punct = string.punctuation + cn_punct + ' \t\n'
+    return all(c in all_punct for c in text)
+
+
+def text_to_spaced_chinese(text: str) -> str:
+    """
+    Convert Chinese text to word-spaced format for better readability.
+
+    Uses jieba segmentation to identify word boundaries and inserts
+    spaces between words. Handles mixed Chinese/English text properly.
+
+    Example:
+        "我今天去北京" -> "我 今天 去 北京"
+        "我在D物流公司" -> "我 在 D物流 公司"
+    """
+    if not contains_chinese(text):
+        return text
+
+    words = segment_text(text)
+    result = []
+    prev_was_word = False  # Previous segment was a word (not punctuation)
+
+    for word in words:
+        is_punct = _is_punctuation(word)
+
+        if not is_punct:
+            # This is a word segment - add space if previous was also a word
+            if prev_was_word and result:
+                result.append(' ')
+            result.append(word)
+            prev_was_word = True
+        else:
+            # Punctuation - just append, no space logic
+            result.append(word)
+            prev_was_word = False
+
+    return ''.join(result)
+
+
+def text_to_pinyin(text: str) -> str:
+    """
+    Convert Chinese text to pinyin with word spacing.
+
+    Uses jieba segmentation to preserve word boundaries, converts each
+    Chinese word to pinyin, and joins with spaces. Non-Chinese text
+    (punctuation, numbers, letters) is preserved in place.
+
+    Example:
+        "我今天去北京。" -> "wǒ jīntiān qù běijīng。"
+        "我在D物流公司" -> "wǒ zài D wùliú gōngsī"
+    """
+    if not contains_chinese(text):
+        return text
+
+    words = segment_text(text)
+    result = []
+    prev_was_word = False  # Previous segment was a word (not punctuation)
+
+    for word in words:
+        is_punct = _is_punctuation(word)
+        word_has_chinese = contains_chinese(word)
+
+        if is_punct:
+            # Punctuation - just append
+            result.append(word)
+            prev_was_word = False
+        elif word_has_chinese:
+            # Chinese word - convert to pinyin
+            if prev_was_word and result:
+                result.append(' ')
+
+            word_pinyin = []
+            for char in word:
+                if is_chinese_char(char):
+                    py = pinyin(char, style=Style.TONE, heteronym=False)
+                    py_str = py[0][0] if py and py[0] else char
+                    word_pinyin.append(py_str)
+                else:
+                    word_pinyin.append(char)
+            result.append(''.join(word_pinyin))
+            prev_was_word = True
+        else:
+            # Non-Chinese word (letters, numbers) - keep as-is
+            if prev_was_word and result:
+                result.append(' ')
+            result.append(word)
+            prev_was_word = True
+
+    return ''.join(result)

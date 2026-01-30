@@ -13,7 +13,12 @@ from ebooklib import epub
 
 warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 
-from .chinese_processing import annotate_text, contains_chinese
+from .chinese_processing import (
+    annotate_text,
+    contains_chinese,
+    text_to_spaced_chinese,
+    text_to_pinyin,
+)
 from .translator import translate_text
 
 logger = logging.getLogger(__name__)
@@ -73,6 +78,22 @@ h1, h2, h3, h4, h5, h6 {
     font-family: Georgia, "Times New Roman", serif;
 }
 
+/* Kindle-optimized paragraph format styling */
+.chinese-text {
+    font-size: 1.1em;
+    line-height: 1.8;
+    margin-bottom: 0.3em;
+    letter-spacing: 0.05em;
+}
+
+.pinyin-text {
+    font-size: 0.85em;
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 0.5em;
+    font-family: Georgia, "Times New Roman", serif;
+}
+
 /* Dark mode support for e-readers that support it */
 @media (prefers-color-scheme: dark) {
     rt {
@@ -82,6 +103,9 @@ h1, h2, h3, h4, h5, h6 {
         background-color: #2a2a2a;
         color: #bbb;
         border-left-color: #555;
+    }
+    .pinyin-text {
+        color: #aaa;
     }
 }
 '''
@@ -95,6 +119,7 @@ def process_epub(
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
     word_spacing: bool = False,
+    kindle_format: bool = False,
 ) -> None:
     """
     Read an EPUB file, add pinyin annotations and/or English translations,
@@ -108,6 +133,9 @@ def process_epub(
         translation_source: Source language code for translation.
         translation_target: Target language code for translation.
         word_spacing: Whether to add spaces between Chinese words for dictionary lookup.
+        kindle_format: If True, use paragraph-by-paragraph format instead of ruby.
+                       Outputs: Chinese paragraph, pinyin paragraph, translation paragraph.
+                       This works better on Kindle which has poor ruby support.
     """
     logger.info(f'Reading EPUB: {input_path}')
     book = epub.read_epub(input_path, options={'ignore_ncx': True})
@@ -142,6 +170,7 @@ def process_epub(
             translation_source=translation_source,
             translation_target=translation_target,
             word_spacing=word_spacing,
+            kindle_format=kindle_format,
         )
         item.set_content(processed.encode('utf-8'))
 
@@ -201,9 +230,7 @@ def _ensure_nav_document(book: epub.EpubBook) -> None:
     logger.info('Creating EPUB3 navigation document')
 
     # Create the nav document
-    nav = epub.EpubNav()
-    nav.set_id('nav')
-    nav.file_name = 'nav.xhtml'
+    nav = epub.EpubNav(uid='nav', file_name='nav.xhtml')
 
     # Add nav to the book
     book.add_item(nav)
@@ -223,10 +250,14 @@ def _process_html_content(
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
     word_spacing: bool = False,
+    kindle_format: bool = False,
 ) -> str:
     """
     Process a single HTML document: annotate Chinese text nodes with
     pinyin and insert English translations after Chinese paragraphs.
+
+    If kindle_format is True, uses paragraph-by-paragraph format instead of
+    ruby annotations (Chinese paragraph, pinyin paragraph, translation paragraph).
     """
     soup = BeautifulSoup(html, 'lxml')
 
@@ -249,19 +280,30 @@ def _process_html_content(
         if not contains_chinese(plain_text):
             continue
 
-        if add_pinyin:
-            _annotate_block(block, soup, word_spacing=word_spacing)
-
-        if add_translation and block.name == 'p':
-            # Translate the original plain text (before pinyin was added)
-            translation = translate_text(
-                plain_text, source=translation_source, target=translation_target
+        if kindle_format:
+            # Kindle-optimized paragraph-by-paragraph format
+            _process_block_kindle_format(
+                block, soup, plain_text,
+                add_pinyin=add_pinyin,
+                add_translation=add_translation,
+                translation_source=translation_source,
+                translation_target=translation_target,
             )
-            if translation and not translation.startswith('[Translation failed'):
-                trans_p = soup.new_tag('p')
-                trans_p['class'] = 'translation'
-                trans_p.string = translation
-                block.insert_after(trans_p)
+        else:
+            # Standard ruby annotation format
+            if add_pinyin:
+                _annotate_block(block, soup, word_spacing=word_spacing)
+
+            if add_translation and block.name == 'p':
+                # Translate the original plain text (before pinyin was added)
+                translation = translate_text(
+                    plain_text, source=translation_source, target=translation_target
+                )
+                if translation and not translation.startswith('[Translation failed'):
+                    trans_p = soup.new_tag('p')
+                    trans_p['class'] = 'translation'
+                    trans_p.string = translation
+                    block.insert_after(trans_p)
 
     # Return as string, preserving the XML declaration if present
     result = str(soup)
@@ -299,3 +341,58 @@ def _annotate_block(block: Tag, soup: BeautifulSoup, word_spacing: bool = False)
         # Parse the annotated HTML and replace the text node
         new_content = BeautifulSoup(annotated_html, 'html.parser')
         text_node.replace_with(new_content)
+
+
+def _process_block_kindle_format(
+    block: Tag,
+    soup: BeautifulSoup,
+    plain_text: str,
+    add_pinyin: bool = True,
+    add_translation: bool = True,
+    translation_source: str = 'zh-CN',
+    translation_target: str = 'en',
+) -> None:
+    """
+    Process a block element using Kindle-optimized paragraph format.
+
+    Instead of ruby annotations, outputs:
+    1. Chinese paragraph with word spacing
+    2. Pinyin paragraph with word spacing
+    3. English translation paragraph (if enabled)
+
+    This format works reliably on Kindle devices which have poor ruby support.
+    """
+    # Elements to insert after the block (in reverse order for insert_after)
+    elements_to_insert = []
+
+    # Add pinyin paragraph first (will appear right after Chinese)
+    if add_pinyin:
+        pinyin_text = text_to_pinyin(plain_text)
+        pinyin_p = soup.new_tag('p')
+        pinyin_p['class'] = 'pinyin-text'
+        pinyin_p.string = pinyin_text
+        elements_to_insert.append(pinyin_p)
+
+    # Add translation paragraph (will appear after pinyin)
+    if add_translation and block.name == 'p':
+        translation = translate_text(
+            plain_text, source=translation_source, target=translation_target
+        )
+        if translation and not translation.startswith('[Translation failed'):
+            trans_p = soup.new_tag('p')
+            trans_p['class'] = 'translation'
+            trans_p.string = translation
+            elements_to_insert.append(trans_p)
+
+    # Update the original block: replace content with word-spaced Chinese
+    spaced_chinese = text_to_spaced_chinese(plain_text)
+    block.clear()
+    block['class'] = block.get('class', [])
+    if isinstance(block['class'], str):
+        block['class'] = [block['class']]
+    block['class'].append('chinese-text')
+    block.string = spaced_chinese
+
+    # Insert elements after the block (in reverse order)
+    for elem in reversed(elements_to_insert):
+        block.insert_after(elem)
