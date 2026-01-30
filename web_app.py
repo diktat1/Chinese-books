@@ -183,6 +183,7 @@ HTML_PAGE = '''
         <div class="options">
             <label><input type="checkbox" name="add_pinyin" checked> Add pinyin above characters</label>
             <label><input type="checkbox" name="add_translation" checked> Add English translation after paragraphs</label>
+            <label><input type="checkbox" name="kindle_format" id="kindleFormat"> <span>Kindle-optimized format (paragraph-by-paragraph instead of ruby)</span></label>
             <label><input type="checkbox" name="kindle_output" id="kindleOutput"> <span>Output as AZW3 for Kindle</span></label>
             <div class="kindle-status" id="kindleStatus"></div>
         </div>
@@ -195,7 +196,9 @@ HTML_PAGE = '''
     <p class="note">
         Pinyin-only conversion is fast (seconds). Adding translations takes longer
         because each paragraph is sent to Google Translate.<br>
-        For Kindle: check "Output as AZW3" for direct Kindle support (requires Calibre).
+        For Kindle: use "Kindle-optimized format" for paragraph-by-paragraph output
+        (Chinese, pinyin, English) which works better on Kindle devices.
+        Check "Output as AZW3" for direct Kindle format (requires Calibre).
     </p>
 </div>
 
@@ -264,10 +267,12 @@ form.addEventListener('submit', async (e) => {
     if (!fileInput.files.length) return;
 
     const kindleOutput = kindleCheckbox.checked;
+    const kindleFormat = document.getElementById('kindleFormat').checked;
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
     formData.append('add_pinyin', form.querySelector('[name=add_pinyin]').checked);
     formData.append('add_translation', form.querySelector('[name=add_translation]').checked);
+    formData.append('kindle_format', kindleFormat);
     formData.append('kindle_output', kindleOutput);
 
     btn.disabled = true;
@@ -337,6 +342,7 @@ def convert():
 
     add_pinyin = request.form.get('add_pinyin', 'true') == 'true'
     add_translation = request.form.get('add_translation', 'true') == 'true'
+    kindle_format = request.form.get('kindle_format', 'false') == 'true'
     kindle_output = request.form.get('kindle_output', 'false') == 'true'
 
     if not add_pinyin and not add_translation:
@@ -357,6 +363,7 @@ def convert():
                 output_path=epub_output_path,
                 add_pinyin=add_pinyin,
                 add_translation=add_translation,
+                kindle_format=kindle_format,
             )
 
             if kindle_output:

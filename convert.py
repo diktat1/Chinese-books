@@ -41,6 +41,7 @@ Examples:
   python convert.py book.epub --word-spacing           # Add spaces between words for Kindle lookup
   python convert.py book.epub --kindle                 # Output AZW3 for Kindle (requires Calibre)
   python convert.py book.epub --kindle --no-keep-epub  # AZW3 only, delete intermediate EPUB
+  python convert.py book.epub --kindle-format          # Paragraph format (Chinese, pinyin, English)
         ''',
     )
 
@@ -73,6 +74,13 @@ Examples:
         '--word-spacing',
         action='store_true',
         help='Add spaces between Chinese words for easier dictionary lookup on e-readers',
+    )
+    parser.add_argument(
+        '--kindle-format',
+        action='store_true',
+        help='Use paragraph-by-paragraph format instead of ruby annotations. '
+             'Outputs: Chinese paragraph (with word spacing), pinyin paragraph, '
+             'English translation. Works better on Kindle which has poor ruby support.',
     )
     parser.add_argument(
         '--kindle', '--azw3',
@@ -155,6 +163,8 @@ Examples:
         mode_parts.append(f'translation ({args.source} -> {args.target})')
     if args.word_spacing:
         mode_parts.append('word-spacing')
+    if args.kindle_format:
+        mode_parts.append('kindle-format (paragraph-by-paragraph)')
     if args.kindle:
         mode_parts.append(f'kindle ({args.kindle_profile})')
 
@@ -174,6 +184,7 @@ Examples:
         translation_source=args.source,
         translation_target=args.target,
         word_spacing=args.word_spacing,
+        kindle_format=args.kindle_format,
     )
 
     if args.kindle:

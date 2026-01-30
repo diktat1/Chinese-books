@@ -104,3 +104,76 @@ def annotate_paragraph(paragraph_text: str, word_spacing: bool = False) -> str:
     lines = paragraph_text.split('\n')
     annotated_lines = [annotate_text(line, word_spacing=word_spacing) for line in lines]
     return '\n'.join(annotated_lines)
+
+
+def text_to_spaced_chinese(text: str) -> str:
+    """
+    Convert Chinese text to word-spaced format for better readability.
+
+    Uses jieba segmentation to identify word boundaries and inserts
+    spaces between Chinese words. Non-Chinese text is preserved as-is.
+
+    Example:
+        "我今天去北京" -> "我 今天 去 北京"
+    """
+    if not contains_chinese(text):
+        return text
+
+    words = segment_text(text)
+    result = []
+    prev_was_chinese = False
+
+    for word in words:
+        word_is_chinese = contains_chinese(word)
+        # Add space before this word if both previous and current are Chinese
+        if prev_was_chinese and word_is_chinese:
+            result.append(' ')
+        result.append(word)
+        prev_was_chinese = word_is_chinese
+
+    return ''.join(result)
+
+
+def text_to_pinyin(text: str) -> str:
+    """
+    Convert Chinese text to pinyin with word spacing.
+
+    Uses jieba segmentation to preserve word boundaries, converts each
+    Chinese word to pinyin, and joins with spaces. Non-Chinese text
+    (punctuation, numbers) is preserved in place.
+
+    Example:
+        "我今天去北京。" -> "wǒ jīntiān qù běijīng。"
+    """
+    if not contains_chinese(text):
+        return text
+
+    words = segment_text(text)
+    result = []
+    prev_was_chinese = False
+
+    for word in words:
+        word_is_chinese = contains_chinese(word)
+
+        if word_is_chinese:
+            # Add space before Chinese words (except first)
+            if prev_was_chinese:
+                result.append(' ')
+
+            # Convert word to pinyin
+            word_pinyin = []
+            for char in word:
+                if is_chinese_char(char):
+                    py = pinyin(char, style=Style.TONE, heteronym=False)
+                    py_str = py[0][0] if py and py[0] else char
+                    word_pinyin.append(py_str)
+                else:
+                    word_pinyin.append(char)
+            result.append(''.join(word_pinyin))
+        else:
+            # Non-Chinese (punctuation, numbers, spaces)
+            result.append(word)
+
+        prev_was_chinese = word_is_chinese
+
+    return ''.join(result)
