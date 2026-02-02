@@ -25,6 +25,7 @@ from graded_reader.calibre import (
     convert_epub_to_azw3,
     CalibreNotFoundError,
 )
+from graded_reader.claude_simplifier import is_anthropic_available, get_api_key
 
 
 def main():
@@ -42,6 +43,9 @@ Examples:
   python convert.py book.epub --kindle                 # Output AZW3 for Kindle (requires Calibre)
   python convert.py book.epub --kindle --no-keep-epub  # AZW3 only, delete intermediate EPUB
   python convert.py book.epub --kindle-format          # Paragraph format (Chinese, pinyin, English)
+  python convert.py book.epub --simplify-hsk4          # Simplify to HSK 4 vocabulary (requires Claude)
+  python convert.py book.epub --use-claude             # Use Claude for translation (higher quality)
+  python convert.py book.epub --simplify-hsk4 --use-opus  # Use Opus model for best quality
         ''',
     )
 
@@ -101,6 +105,24 @@ Examples:
         help='Delete the intermediate EPUB after AZW3 conversion',
     )
     parser.add_argument(
+        '--simplify-hsk4',
+        action='store_true',
+        help='Simplify Chinese vocabulary to HSK 4 level using Claude AI. '
+             'Requires ANTHROPIC_API_KEY environment variable.',
+    )
+    parser.add_argument(
+        '--use-claude',
+        action='store_true',
+        help='Use Claude AI for translation instead of Google Translate. '
+             'Provides higher quality translations. Requires ANTHROPIC_API_KEY.',
+    )
+    parser.add_argument(
+        '--use-opus',
+        action='store_true',
+        help='Use Claude Opus model for highest quality (slower, more expensive). '
+             'Applies to both HSK simplification and Claude translation.',
+    )
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Enable verbose logging',
@@ -131,6 +153,16 @@ Examples:
         print(f'Error: {error.message}', file=sys.stderr)
         sys.exit(1)
 
+    # Check Anthropic availability if Claude features are requested
+    if args.simplify_hsk4 or args.use_claude:
+        if not is_anthropic_available():
+            print('Error: Anthropic SDK not installed. Install with: pip install anthropic', file=sys.stderr)
+            sys.exit(1)
+        if not get_api_key():
+            print('Error: ANTHROPIC_API_KEY environment variable not set.', file=sys.stderr)
+            print('Get your API key from https://console.anthropic.com/', file=sys.stderr)
+            sys.exit(1)
+
     # Determine output paths
     if args.kindle:
         # For AZW3 output, we need both an intermediate EPUB and final AZW3 path
@@ -157,10 +189,15 @@ Examples:
         sys.exit(1)
 
     mode_parts = []
+    if args.simplify_hsk4:
+        model_note = ' (Opus)' if args.use_opus else ''
+        mode_parts.append(f'HSK4-simplify{model_note}')
     if add_pinyin:
         mode_parts.append('pinyin')
     if add_translation:
-        mode_parts.append(f'translation ({args.source} -> {args.target})')
+        translator = 'Claude' if args.use_claude else 'Google'
+        model_note = ' Opus' if args.use_claude and args.use_opus else ''
+        mode_parts.append(f'translation ({args.source} -> {args.target}, {translator}{model_note})')
     if args.word_spacing:
         mode_parts.append('word-spacing')
     if args.kindle_format:
@@ -185,6 +222,9 @@ Examples:
         translation_target=args.target,
         word_spacing=args.word_spacing,
         kindle_format=args.kindle_format,
+        simplify_hsk4=args.simplify_hsk4,
+        use_claude_translator=args.use_claude,
+        use_opus=args.use_opus,
     )
 
     if args.kindle:

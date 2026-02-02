@@ -22,6 +22,7 @@ from graded_reader.calibre import (
     convert_epub_to_azw3,
     CalibreNotFoundError,
 )
+from graded_reader.claude_simplifier import is_anthropic_available, get_api_key
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -165,6 +166,24 @@ HTML_PAGE = '''
         .options input:disabled + span {
             color: #999;
         }
+        .claude-status {
+            font-size: 0.85em;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-top: 8px;
+        }
+        .claude-status.available {
+            background: #d4edda;
+            color: #155724;
+        }
+        .claude-status.missing {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .claude-status a {
+            color: inherit;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -186,6 +205,11 @@ HTML_PAGE = '''
             <label><input type="checkbox" name="kindle_format" id="kindleFormat"> <span>Kindle-optimized format (paragraph-by-paragraph instead of ruby)</span></label>
             <label><input type="checkbox" name="kindle_output" id="kindleOutput"> <span>Output as AZW3 for Kindle</span></label>
             <div class="kindle-status" id="kindleStatus"></div>
+            <hr style="margin: 15px 0; border: none; border-top: 1px solid #eee;">
+            <label><input type="checkbox" name="simplify_hsk4" id="simplifyHsk4"> <span>Simplify to HSK 4 vocabulary (Claude AI)</span></label>
+            <label><input type="checkbox" name="use_claude" id="useClaude"> <span>Use Claude AI for translation (higher quality)</span></label>
+            <label><input type="checkbox" name="use_opus" id="useOpus"> <span>Use Claude Opus model (best quality, slower)</span></label>
+            <div class="claude-status" id="claudeStatus"></div>
         </div>
 
         <button type="submit" id="convertBtn" disabled>Convert to Graded Reader</button>
@@ -198,7 +222,10 @@ HTML_PAGE = '''
         because each paragraph is sent to Google Translate.<br>
         For Kindle: use "Kindle-optimized format" for paragraph-by-paragraph output
         (Chinese, pinyin, English) which works better on Kindle devices.
-        Check "Output as AZW3" for direct Kindle format (requires Calibre).
+        Check "Output as AZW3" for direct Kindle format (requires Calibre).<br>
+        <strong>Claude AI features:</strong> HSK 4 simplification replaces advanced vocabulary
+        with simpler words. Claude translation provides higher quality than Google Translate.
+        Requires ANTHROPIC_API_KEY environment variable.
     </p>
 </div>
 
@@ -232,6 +259,40 @@ async function checkCalibre() {
     }
 }
 checkCalibre();
+
+// Check Claude/Anthropic availability
+const claudeStatus = document.getElementById('claudeStatus');
+const simplifyHsk4 = document.getElementById('simplifyHsk4');
+const useClaude = document.getElementById('useClaude');
+const useOpus = document.getElementById('useOpus');
+
+async function checkClaude() {
+    try {
+        const resp = await fetch('/check-claude');
+        const data = await resp.json();
+        if (data.available) {
+            claudeStatus.className = 'claude-status available';
+            claudeStatus.textContent = 'Claude AI ready (API key configured)';
+        } else {
+            claudeStatus.className = 'claude-status missing';
+            if (data.reason === 'no_sdk') {
+                claudeStatus.innerHTML = 'Anthropic SDK not installed. Run: pip install anthropic';
+            } else {
+                claudeStatus.innerHTML = 'ANTHROPIC_API_KEY not set. <a href="https://console.anthropic.com/" target="_blank">Get API key</a>';
+            }
+            simplifyHsk4.disabled = true;
+            useClaude.disabled = true;
+            useOpus.disabled = true;
+        }
+    } catch (e) {
+        claudeStatus.className = 'claude-status missing';
+        claudeStatus.textContent = 'Could not check Claude status';
+        simplifyHsk4.disabled = true;
+        useClaude.disabled = true;
+        useOpus.disabled = true;
+    }
+}
+checkClaude();
 
 dropZone.addEventListener('click', () => fileInput.click());
 
@@ -274,6 +335,9 @@ form.addEventListener('submit', async (e) => {
     formData.append('add_translation', form.querySelector('[name=add_translation]').checked);
     formData.append('kindle_format', kindleFormat);
     formData.append('kindle_output', kindleOutput);
+    formData.append('simplify_hsk4', simplifyHsk4.checked);
+    formData.append('use_claude', useClaude.checked);
+    formData.append('use_opus', useOpus.checked);
 
     btn.disabled = true;
     status.className = 'status processing';
@@ -331,6 +395,24 @@ def check_calibre():
     })
 
 
+@app.route('/check-claude')
+def check_claude():
+    """Check if Claude/Anthropic API is available."""
+    if not is_anthropic_available():
+        return jsonify({
+            'available': False,
+            'reason': 'no_sdk',
+        })
+    if not get_api_key():
+        return jsonify({
+            'available': False,
+            'reason': 'no_api_key',
+        })
+    return jsonify({
+        'available': True,
+    })
+
+
 @app.route('/convert', methods=['POST'])
 def convert():
     if 'file' not in request.files:
@@ -344,12 +426,21 @@ def convert():
     add_translation = request.form.get('add_translation', 'true') == 'true'
     kindle_format = request.form.get('kindle_format', 'false') == 'true'
     kindle_output = request.form.get('kindle_output', 'false') == 'true'
+    simplify_hsk4 = request.form.get('simplify_hsk4', 'false') == 'true'
+    use_claude = request.form.get('use_claude', 'false') == 'true'
+    use_opus = request.form.get('use_opus', 'false') == 'true'
 
     if not add_pinyin and not add_translation:
         return 'Select at least one option (pinyin or translation)', 400
 
     if kindle_output and not is_calibre_installed():
         return 'Calibre is not installed. Cannot convert to AZW3.', 400
+
+    if (simplify_hsk4 or use_claude) and not is_anthropic_available():
+        return 'Anthropic SDK not installed. Install with: pip install anthropic', 400
+
+    if (simplify_hsk4 or use_claude) and not get_api_key():
+        return 'ANTHROPIC_API_KEY environment variable not set.', 400
 
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = os.path.join(tmpdir, 'input.epub')
@@ -364,6 +455,9 @@ def convert():
                 add_pinyin=add_pinyin,
                 add_translation=add_translation,
                 kindle_format=kindle_format,
+                simplify_hsk4=simplify_hsk4,
+                use_claude_translator=use_claude,
+                use_opus=use_opus,
             )
 
             if kindle_output:
