@@ -20,6 +20,8 @@ from .chinese_processing import (
     text_to_pinyin,
 )
 from .translator import translate_text
+from .claude_simplifier import simplify_to_hsk4, is_anthropic_available as is_simplifier_available
+from .claude_translator import translate_text_claude
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +122,9 @@ def process_epub(
     translation_target: str = 'en',
     word_spacing: bool = False,
     kindle_format: bool = False,
+    simplify_hsk4: bool = False,
+    use_claude_translator: bool = False,
+    use_opus: bool = False,
 ) -> None:
     """
     Read an EPUB file, add pinyin annotations and/or English translations,
@@ -136,6 +141,9 @@ def process_epub(
         kindle_format: If True, use paragraph-by-paragraph format instead of ruby.
                        Outputs: Chinese paragraph, pinyin paragraph, translation paragraph.
                        This works better on Kindle which has poor ruby support.
+        simplify_hsk4: If True, simplify Chinese vocabulary to HSK 4 level using Claude.
+        use_claude_translator: If True, use Claude for translation instead of Google Translate.
+        use_opus: If True, use Claude Opus model for higher quality (slower, more expensive).
     """
     logger.info(f'Reading EPUB: {input_path}')
     book = epub.read_epub(input_path, options={'ignore_ncx': True})
@@ -171,6 +179,9 @@ def process_epub(
             translation_target=translation_target,
             word_spacing=word_spacing,
             kindle_format=kindle_format,
+            simplify_hsk4=simplify_hsk4,
+            use_claude_translator=use_claude_translator,
+            use_opus=use_opus,
         )
         item.set_content(processed.encode('utf-8'))
 
@@ -251,6 +262,9 @@ def _process_html_content(
     translation_target: str = 'en',
     word_spacing: bool = False,
     kindle_format: bool = False,
+    simplify_hsk4: bool = False,
+    use_claude_translator: bool = False,
+    use_opus: bool = False,
 ) -> str:
     """
     Process a single HTML document: annotate Chinese text nodes with
@@ -258,6 +272,9 @@ def _process_html_content(
 
     If kindle_format is True, uses paragraph-by-paragraph format instead of
     ruby annotations (Chinese paragraph, pinyin paragraph, translation paragraph).
+
+    If simplify_hsk4 is True, simplifies vocabulary to HSK 4 level before processing.
+    If use_claude_translator is True, uses Claude instead of Google Translate.
     """
     soup = BeautifulSoup(html, 'lxml')
 
@@ -280,6 +297,15 @@ def _process_html_content(
         if not contains_chinese(plain_text):
             continue
 
+        # Apply HSK 4 simplification if enabled
+        if simplify_hsk4:
+            simplified_text = simplify_to_hsk4(plain_text, use_opus=use_opus)
+            if simplified_text and not simplified_text.startswith('['):
+                # Update the block content with simplified text
+                block.clear()
+                block.string = simplified_text
+                plain_text = simplified_text
+
         if kindle_format:
             # Kindle-optimized paragraph-by-paragraph format
             _process_block_kindle_format(
@@ -288,6 +314,8 @@ def _process_html_content(
                 add_translation=add_translation,
                 translation_source=translation_source,
                 translation_target=translation_target,
+                use_claude_translator=use_claude_translator,
+                use_opus=use_opus,
             )
         else:
             # Standard ruby annotation format
@@ -296,10 +324,16 @@ def _process_html_content(
 
             if add_translation and block.name == 'p':
                 # Translate the original plain text (before pinyin was added)
-                translation = translate_text(
-                    plain_text, source=translation_source, target=translation_target
-                )
-                if translation and not translation.startswith('[Translation failed'):
+                if use_claude_translator:
+                    translation = translate_text_claude(
+                        plain_text, source=translation_source, target=translation_target,
+                        use_opus=use_opus
+                    )
+                else:
+                    translation = translate_text(
+                        plain_text, source=translation_source, target=translation_target
+                    )
+                if translation and not translation.startswith('[Translation failed') and not translation.startswith('[Translation'):
                     trans_p = soup.new_tag('p')
                     trans_p['class'] = 'translation'
                     trans_p.string = translation
@@ -351,6 +385,8 @@ def _process_block_kindle_format(
     add_translation: bool = True,
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
+    use_claude_translator: bool = False,
+    use_opus: bool = False,
 ) -> None:
     """
     Process a block element using Kindle-optimized paragraph format.
@@ -375,10 +411,16 @@ def _process_block_kindle_format(
 
     # Add translation paragraph (will appear after pinyin)
     if add_translation and block.name == 'p':
-        translation = translate_text(
-            plain_text, source=translation_source, target=translation_target
-        )
-        if translation and not translation.startswith('[Translation failed'):
+        if use_claude_translator:
+            translation = translate_text_claude(
+                plain_text, source=translation_source, target=translation_target,
+                use_opus=use_opus
+            )
+        else:
+            translation = translate_text(
+                plain_text, source=translation_source, target=translation_target
+            )
+        if translation and not translation.startswith('[Translation failed') and not translation.startswith('[Translation'):
             trans_p = soup.new_tag('p')
             trans_p['class'] = 'translation'
             trans_p.string = translation
