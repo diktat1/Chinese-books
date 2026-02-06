@@ -1,0 +1,599 @@
+name: Convert Chinese EPUB to Graded Reader
+
+on:
+  # Manual trigger from GitHub UI with form inputs
+  workflow_dispatch:
+    inputs:
+      # INPUT FILE
+      artifact_name:
+        description: 'Name of input artifact containing EPUB file (upload artifact first)'
+        type: string
+        required: false
+      epub_filename:
+        description: 'Name of the EPUB file within the artifact (or in input-epubs/)'
+        type: string
+        required: true
+
+      # CORE OPTIONS
+      add_pinyin:
+        description: 'Add pinyin ruby annotations above Chinese characters'
+        type: boolean
+        default: true
+        required: false
+
+      add_translation:
+        description: 'Add translations after paragraphs'
+        type: boolean
+        default: true
+        required: false
+
+      translation_source:
+        description: 'Source language code'
+        type: string
+        default: 'zh-CN'
+        required: false
+
+      translation_target:
+        description: 'Target language code (en, ja, ko, fr, de, es, etc.)'
+        type: string
+        default: 'en'
+        required: false
+
+      word_spacing:
+        description: 'Add spaces between Chinese words for dictionary lookup'
+        type: boolean
+        default: false
+        required: false
+
+      kindle_format:
+        description: 'Use paragraph format instead of ruby tags (better for Kindle)'
+        type: boolean
+        default: false
+        required: false
+
+      # AI/CLAUDE OPTIONS
+      simplify_hsk4:
+        description: 'Simplify vocabulary to HSK 4 level using Claude (requires ANTHROPIC_API_KEY secret)'
+        type: boolean
+        default: false
+        required: false
+
+      use_claude:
+        description: 'Use Claude for translation instead of Google Translate (requires ANTHROPIC_API_KEY secret)'
+        type: boolean
+        default: false
+        required: false
+
+      use_opus:
+        description: 'Use Claude Opus model for highest quality (slower, more expensive)'
+        type: boolean
+        default: false
+        required: false
+
+      # KINDLE OUTPUT OPTIONS
+      kindle_output:
+        description: 'Convert output to AZW3 format for Kindle (requires Calibre)'
+        type: boolean
+        default: false
+        required: false
+
+      output_profile:
+        description: 'Kindle device profile for AZW3 conversion'
+        type: choice
+        options:
+          - kindle_pw3
+          - kindle
+          - kindle_dx
+          - kindle_fire
+          - kindle_oasis
+          - kindle_pw
+          - kindle_scribe
+          - kindle_voyage
+        default: 'kindle_pw3'
+        required: false
+
+      keep_epub:
+        description: 'Keep intermediate EPUB when outputting AZW3'
+        type: boolean
+        default: true
+        required: false
+
+  # API trigger for external systems
+  repository_dispatch:
+    types: [convert-epub]
+
+  # File-based trigger when EPUBs are added to input-epubs/
+  push:
+    paths:
+      - 'input-epubs/**/*.epub'
+    branches:
+      - main
+
+env:
+  PYTHON_VERSION: '3.11'
+
+# Prevent multiple simultaneous conversions
+concurrency:
+  group: convert-${{ github.ref }}-${{ github.event.inputs.epub_filename || github.event.client_payload.epub_filename || 'file-trigger' }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    outputs:
+      add_pinyin: ${{ steps.params.outputs.add_pinyin }}
+      add_translation: ${{ steps.params.outputs.add_translation }}
+      translation_source: ${{ steps.params.outputs.translation_source }}
+      translation_target: ${{ steps.params.outputs.translation_target }}
+      word_spacing: ${{ steps.params.outputs.word_spacing }}
+      kindle_format: ${{ steps.params.outputs.kindle_format }}
+      simplify_hsk4: ${{ steps.params.outputs.simplify_hsk4 }}
+      use_claude: ${{ steps.params.outputs.use_claude }}
+      use_opus: ${{ steps.params.outputs.use_opus }}
+      kindle_output: ${{ steps.params.outputs.kindle_output }}
+      output_profile: ${{ steps.params.outputs.output_profile }}
+      keep_epub: ${{ steps.params.outputs.keep_epub }}
+      artifact_name: ${{ steps.params.outputs.artifact_name }}
+      epub_filename: ${{ steps.params.outputs.epub_filename }}
+      needs_claude: ${{ steps.params.outputs.needs_claude }}
+      needs_calibre: ${{ steps.params.outputs.needs_calibre }}
+      trigger_type: ${{ steps.params.outputs.trigger_type }}
+
+    steps:
+      - name: Normalize parameters from different triggers
+        id: params
+        run: |
+          # Determine trigger type
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "trigger_type=workflow_dispatch" >> $GITHUB_OUTPUT
+
+            # Extract from workflow_dispatch inputs
+            echo "add_pinyin=${{ inputs.add_pinyin }}" >> $GITHUB_OUTPUT
+            echo "add_translation=${{ inputs.add_translation }}" >> $GITHUB_OUTPUT
+            echo "translation_source=${{ inputs.translation_source }}" >> $GITHUB_OUTPUT
+            echo "translation_target=${{ inputs.translation_target }}" >> $GITHUB_OUTPUT
+            echo "word_spacing=${{ inputs.word_spacing }}" >> $GITHUB_OUTPUT
+            echo "kindle_format=${{ inputs.kindle_format }}" >> $GITHUB_OUTPUT
+            echo "simplify_hsk4=${{ inputs.simplify_hsk4 }}" >> $GITHUB_OUTPUT
+            echo "use_claude=${{ inputs.use_claude }}" >> $GITHUB_OUTPUT
+            echo "use_opus=${{ inputs.use_opus }}" >> $GITHUB_OUTPUT
+            echo "kindle_output=${{ inputs.kindle_output }}" >> $GITHUB_OUTPUT
+            echo "output_profile=${{ inputs.output_profile }}" >> $GITHUB_OUTPUT
+            echo "keep_epub=${{ inputs.keep_epub }}" >> $GITHUB_OUTPUT
+            echo "artifact_name=${{ inputs.artifact_name }}" >> $GITHUB_OUTPUT
+            echo "epub_filename=${{ inputs.epub_filename }}" >> $GITHUB_OUTPUT
+
+            # Determine dependencies
+            if [ "${{ inputs.simplify_hsk4 }}" == "true" ] || [ "${{ inputs.use_claude }}" == "true" ]; then
+              echo "needs_claude=true" >> $GITHUB_OUTPUT
+            else
+              echo "needs_claude=false" >> $GITHUB_OUTPUT
+            fi
+
+            if [ "${{ inputs.kindle_output }}" == "true" ]; then
+              echo "needs_calibre=true" >> $GITHUB_OUTPUT
+            else
+              echo "needs_calibre=false" >> $GITHUB_OUTPUT
+            fi
+
+          elif [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+            echo "trigger_type=repository_dispatch" >> $GITHUB_OUTPUT
+
+            # Extract from client_payload with defaults
+            ADD_PINYIN="${{ github.event.client_payload.add_pinyin }}"
+            echo "add_pinyin=${ADD_PINYIN:-true}" >> $GITHUB_OUTPUT
+
+            ADD_TRANSLATION="${{ github.event.client_payload.add_translation }}"
+            echo "add_translation=${ADD_TRANSLATION:-true}" >> $GITHUB_OUTPUT
+
+            TRANSLATION_SOURCE="${{ github.event.client_payload.translation_source }}"
+            echo "translation_source=${TRANSLATION_SOURCE:-zh-CN}" >> $GITHUB_OUTPUT
+
+            TRANSLATION_TARGET="${{ github.event.client_payload.translation_target }}"
+            echo "translation_target=${TRANSLATION_TARGET:-en}" >> $GITHUB_OUTPUT
+
+            WORD_SPACING="${{ github.event.client_payload.word_spacing }}"
+            echo "word_spacing=${WORD_SPACING:-false}" >> $GITHUB_OUTPUT
+
+            KINDLE_FORMAT="${{ github.event.client_payload.kindle_format }}"
+            echo "kindle_format=${KINDLE_FORMAT:-false}" >> $GITHUB_OUTPUT
+
+            SIMPLIFY_HSK4="${{ github.event.client_payload.simplify_hsk4 }}"
+            echo "simplify_hsk4=${SIMPLIFY_HSK4:-false}" >> $GITHUB_OUTPUT
+
+            USE_CLAUDE="${{ github.event.client_payload.use_claude }}"
+            echo "use_claude=${USE_CLAUDE:-false}" >> $GITHUB_OUTPUT
+
+            USE_OPUS="${{ github.event.client_payload.use_opus }}"
+            echo "use_opus=${USE_OPUS:-false}" >> $GITHUB_OUTPUT
+
+            KINDLE_OUTPUT="${{ github.event.client_payload.kindle_output }}"
+            echo "kindle_output=${KINDLE_OUTPUT:-false}" >> $GITHUB_OUTPUT
+
+            OUTPUT_PROFILE="${{ github.event.client_payload.output_profile }}"
+            echo "output_profile=${OUTPUT_PROFILE:-kindle_pw3}" >> $GITHUB_OUTPUT
+
+            KEEP_EPUB="${{ github.event.client_payload.keep_epub }}"
+            echo "keep_epub=${KEEP_EPUB:-true}" >> $GITHUB_OUTPUT
+
+            echo "artifact_name=${{ github.event.client_payload.artifact_name }}" >> $GITHUB_OUTPUT
+            echo "epub_filename=${{ github.event.client_payload.epub_filename }}" >> $GITHUB_OUTPUT
+
+            # Determine dependencies
+            if [ "${SIMPLIFY_HSK4:-false}" == "true" ] || [ "${USE_CLAUDE:-false}" == "true" ]; then
+              echo "needs_claude=true" >> $GITHUB_OUTPUT
+            else
+              echo "needs_claude=false" >> $GITHUB_OUTPUT
+            fi
+
+            if [ "${KINDLE_OUTPUT:-false}" == "true" ]; then
+              echo "needs_calibre=true" >> $GITHUB_OUTPUT
+            else
+              echo "needs_calibre=false" >> $GITHUB_OUTPUT
+            fi
+
+          elif [ "${{ github.event_name }}" == "push" ]; then
+            echo "trigger_type=push" >> $GITHUB_OUTPUT
+
+            # For push triggers, use defaults (can be overridden by config.json in convert job)
+            echo "add_pinyin=true" >> $GITHUB_OUTPUT
+            echo "add_translation=true" >> $GITHUB_OUTPUT
+            echo "translation_source=zh-CN" >> $GITHUB_OUTPUT
+            echo "translation_target=en" >> $GITHUB_OUTPUT
+            echo "word_spacing=false" >> $GITHUB_OUTPUT
+            echo "kindle_format=false" >> $GITHUB_OUTPUT
+            echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
+            echo "use_claude=false" >> $GITHUB_OUTPUT
+            echo "use_opus=false" >> $GITHUB_OUTPUT
+            echo "kindle_output=false" >> $GITHUB_OUTPUT
+            echo "output_profile=kindle_pw3" >> $GITHUB_OUTPUT
+            echo "keep_epub=true" >> $GITHUB_OUTPUT
+            echo "artifact_name=" >> $GITHUB_OUTPUT
+            echo "epub_filename=" >> $GITHUB_OUTPUT
+            echo "needs_claude=false" >> $GITHUB_OUTPUT
+            echo "needs_calibre=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate at least pinyin or translation selected
+        if: steps.params.outputs.trigger_type != 'push'
+        run: |
+          if [ "${{ steps.params.outputs.add_pinyin }}" != "true" ] && [ "${{ steps.params.outputs.add_translation }}" != "true" ]; then
+            echo "::error::Must select at least pinyin OR translation"
+            exit 1
+          fi
+
+      - name: Validate Claude API key is available (if needed)
+        if: steps.params.outputs.needs_claude == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is required for Claude features (simplify_hsk4 or use_claude)"
+            echo "::error::Add the secret in Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+          echo "Claude API key is configured"
+
+  convert:
+    name: Convert EPUB
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Calibre (if needed for AZW3 output)
+        if: needs.validate.outputs.needs_calibre == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y calibre
+          echo "Calibre version:"
+          ebook-convert --version || true
+
+      - name: Download input artifact (workflow_dispatch/repository_dispatch)
+        if: needs.validate.outputs.trigger_type != 'push' && needs.validate.outputs.artifact_name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.artifact_name }}
+          path: ./input
+        continue-on-error: true
+
+      - name: Prepare input from input-epubs folder
+        id: prepare_input
+        run: |
+          mkdir -p ./input ./output
+
+          TRIGGER_TYPE="${{ needs.validate.outputs.trigger_type }}"
+          EPUB_FILENAME="${{ needs.validate.outputs.epub_filename }}"
+
+          if [ "$TRIGGER_TYPE" == "push" ]; then
+            # For push triggers, find changed EPUB files
+            echo "Processing push trigger - finding changed EPUB files..."
+
+            # Get list of changed EPUB files
+            git diff --name-only ${{ github.event.before }} ${{ github.sha }} -- 'input-epubs/**/*.epub' > changed_files.txt 2>/dev/null || true
+
+            # Also check for newly added files
+            git diff --name-status ${{ github.event.before }} ${{ github.sha }} -- 'input-epubs/**/*.epub' | grep "^A" | cut -f2 >> changed_files.txt 2>/dev/null || true
+
+            # Copy changed files to input directory
+            FOUND_FILES=0
+            while IFS= read -r file; do
+              if [ -n "$file" ] && [ -f "$file" ]; then
+                cp "$file" ./input/
+                echo "Found EPUB: $file"
+                FOUND_FILES=$((FOUND_FILES + 1))
+              fi
+            done < changed_files.txt
+
+            # Fallback: if no changed files detected, check all EPUBs in input-epubs
+            if [ "$FOUND_FILES" -eq 0 ]; then
+              echo "No changed files detected, checking input-epubs folder..."
+              for file in input-epubs/*.epub; do
+                if [ -f "$file" ]; then
+                  cp "$file" ./input/
+                  echo "Found EPUB: $file"
+                  FOUND_FILES=$((FOUND_FILES + 1))
+                fi
+              done
+            fi
+
+            if [ "$FOUND_FILES" -eq 0 ]; then
+              echo "::warning::No EPUB files found to process"
+              echo "skip_conversion=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            # List all EPUBs to process
+            ls -la ./input/*.epub 2>/dev/null || true
+            echo "files_to_process=$(ls -1 ./input/*.epub 2>/dev/null | tr '\n' ',' | sed 's/,$//')" >> $GITHUB_OUTPUT
+            echo "skip_conversion=false" >> $GITHUB_OUTPUT
+
+          else
+            # For workflow_dispatch/repository_dispatch, use specified filename
+            if [ -z "$EPUB_FILENAME" ]; then
+              echo "::error::epub_filename is required"
+              exit 1
+            fi
+
+            # Check if file exists in input (from artifact) or input-epubs folder
+            if [ -f "./input/$EPUB_FILENAME" ]; then
+              echo "Found EPUB in input artifact: $EPUB_FILENAME"
+            elif [ -f "./input-epubs/$EPUB_FILENAME" ]; then
+              cp "./input-epubs/$EPUB_FILENAME" ./input/
+              echo "Found EPUB in input-epubs folder: $EPUB_FILENAME"
+            else
+              echo "::error::EPUB file not found: $EPUB_FILENAME"
+              echo "::error::Upload as artifact or place in input-epubs/ folder"
+              exit 1
+            fi
+
+            echo "files_to_process=./input/$EPUB_FILENAME" >> $GITHUB_OUTPUT
+            echo "skip_conversion=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Load config from input-epubs/config.json (push trigger)
+        id: load_config
+        if: needs.validate.outputs.trigger_type == 'push' && steps.prepare_input.outputs.skip_conversion != 'true'
+        run: |
+          if [ -f "./input-epubs/config.json" ]; then
+            echo "Loading conversion options from input-epubs/config.json"
+            cat ./input-epubs/config.json
+
+            # Extract options from config file
+            ADD_PINYIN=$(jq -r '.add_pinyin // true' ./input-epubs/config.json)
+            ADD_TRANSLATION=$(jq -r '.add_translation // true' ./input-epubs/config.json)
+            TRANSLATION_SOURCE=$(jq -r '.translation_source // "zh-CN"' ./input-epubs/config.json)
+            TRANSLATION_TARGET=$(jq -r '.translation_target // "en"' ./input-epubs/config.json)
+            WORD_SPACING=$(jq -r '.word_spacing // false' ./input-epubs/config.json)
+            KINDLE_FORMAT=$(jq -r '.kindle_format // false' ./input-epubs/config.json)
+            SIMPLIFY_HSK4=$(jq -r '.simplify_hsk4 // false' ./input-epubs/config.json)
+            USE_CLAUDE=$(jq -r '.use_claude // false' ./input-epubs/config.json)
+            USE_OPUS=$(jq -r '.use_opus // false' ./input-epubs/config.json)
+            KINDLE_OUTPUT=$(jq -r '.kindle_output // false' ./input-epubs/config.json)
+            OUTPUT_PROFILE=$(jq -r '.output_profile // "kindle_pw3"' ./input-epubs/config.json)
+            KEEP_EPUB=$(jq -r '.keep_epub // true' ./input-epubs/config.json)
+
+            echo "add_pinyin=$ADD_PINYIN" >> $GITHUB_OUTPUT
+            echo "add_translation=$ADD_TRANSLATION" >> $GITHUB_OUTPUT
+            echo "translation_source=$TRANSLATION_SOURCE" >> $GITHUB_OUTPUT
+            echo "translation_target=$TRANSLATION_TARGET" >> $GITHUB_OUTPUT
+            echo "word_spacing=$WORD_SPACING" >> $GITHUB_OUTPUT
+            echo "kindle_format=$KINDLE_FORMAT" >> $GITHUB_OUTPUT
+            echo "simplify_hsk4=$SIMPLIFY_HSK4" >> $GITHUB_OUTPUT
+            echo "use_claude=$USE_CLAUDE" >> $GITHUB_OUTPUT
+            echo "use_opus=$USE_OPUS" >> $GITHUB_OUTPUT
+            echo "kindle_output=$KINDLE_OUTPUT" >> $GITHUB_OUTPUT
+            echo "output_profile=$OUTPUT_PROFILE" >> $GITHUB_OUTPUT
+            echo "keep_epub=$KEEP_EPUB" >> $GITHUB_OUTPUT
+            echo "config_loaded=true" >> $GITHUB_OUTPUT
+          else
+            echo "No config.json found, using defaults"
+            echo "config_loaded=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Convert EPUB(s)
+        if: steps.prepare_input.outputs.skip_conversion != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Determine which options to use (config.json overrides for push trigger)
+          TRIGGER_TYPE="${{ needs.validate.outputs.trigger_type }}"
+          CONFIG_LOADED="${{ steps.load_config.outputs.config_loaded }}"
+
+          if [ "$TRIGGER_TYPE" == "push" ] && [ "$CONFIG_LOADED" == "true" ]; then
+            ADD_PINYIN="${{ steps.load_config.outputs.add_pinyin }}"
+            ADD_TRANSLATION="${{ steps.load_config.outputs.add_translation }}"
+            TRANSLATION_SOURCE="${{ steps.load_config.outputs.translation_source }}"
+            TRANSLATION_TARGET="${{ steps.load_config.outputs.translation_target }}"
+            WORD_SPACING="${{ steps.load_config.outputs.word_spacing }}"
+            KINDLE_FORMAT="${{ steps.load_config.outputs.kindle_format }}"
+            SIMPLIFY_HSK4="${{ steps.load_config.outputs.simplify_hsk4 }}"
+            USE_CLAUDE="${{ steps.load_config.outputs.use_claude }}"
+            USE_OPUS="${{ steps.load_config.outputs.use_opus }}"
+            KINDLE_OUTPUT="${{ steps.load_config.outputs.kindle_output }}"
+            OUTPUT_PROFILE="${{ steps.load_config.outputs.output_profile }}"
+            KEEP_EPUB="${{ steps.load_config.outputs.keep_epub }}"
+          else
+            ADD_PINYIN="${{ needs.validate.outputs.add_pinyin }}"
+            ADD_TRANSLATION="${{ needs.validate.outputs.add_translation }}"
+            TRANSLATION_SOURCE="${{ needs.validate.outputs.translation_source }}"
+            TRANSLATION_TARGET="${{ needs.validate.outputs.translation_target }}"
+            WORD_SPACING="${{ needs.validate.outputs.word_spacing }}"
+            KINDLE_FORMAT="${{ needs.validate.outputs.kindle_format }}"
+            SIMPLIFY_HSK4="${{ needs.validate.outputs.simplify_hsk4 }}"
+            USE_CLAUDE="${{ needs.validate.outputs.use_claude }}"
+            USE_OPUS="${{ needs.validate.outputs.use_opus }}"
+            KINDLE_OUTPUT="${{ needs.validate.outputs.kindle_output }}"
+            OUTPUT_PROFILE="${{ needs.validate.outputs.output_profile }}"
+            KEEP_EPUB="${{ needs.validate.outputs.keep_epub }}"
+          fi
+
+          # Process each EPUB file
+          for INPUT_FILE in ./input/*.epub; do
+            if [ ! -f "$INPUT_FILE" ]; then
+              continue
+            fi
+
+            BASENAME=$(basename "$INPUT_FILE" .epub)
+            OUTPUT_FILE="./output/${BASENAME}_graded.epub"
+
+            echo "=========================================="
+            echo "Converting: $INPUT_FILE"
+            echo "Output: $OUTPUT_FILE"
+            echo "=========================================="
+
+            # Build conversion command
+            CMD="python convert.py \"$INPUT_FILE\" -o \"$OUTPUT_FILE\""
+
+            # Add source/target languages
+            CMD="$CMD --source \"$TRANSLATION_SOURCE\" --target \"$TRANSLATION_TARGET\""
+
+            # Handle pinyin-only or translation-only modes
+            if [ "$ADD_PINYIN" != "true" ] && [ "$ADD_TRANSLATION" == "true" ]; then
+              CMD="$CMD --translation-only"
+            elif [ "$ADD_PINYIN" == "true" ] && [ "$ADD_TRANSLATION" != "true" ]; then
+              CMD="$CMD --pinyin-only"
+            fi
+            # If both are true, no special flag needed (default behavior)
+
+            # Add optional flags
+            if [ "$WORD_SPACING" == "true" ]; then
+              CMD="$CMD --word-spacing"
+            fi
+
+            if [ "$KINDLE_FORMAT" == "true" ]; then
+              CMD="$CMD --kindle-format"
+            fi
+
+            if [ "$SIMPLIFY_HSK4" == "true" ]; then
+              CMD="$CMD --simplify-hsk4"
+            fi
+
+            if [ "$USE_CLAUDE" == "true" ]; then
+              CMD="$CMD --use-claude"
+            fi
+
+            if [ "$USE_OPUS" == "true" ]; then
+              CMD="$CMD --use-opus"
+            fi
+
+            if [ "$KINDLE_OUTPUT" == "true" ]; then
+              CMD="$CMD --kindle --kindle-profile $OUTPUT_PROFILE"
+              if [ "$KEEP_EPUB" != "true" ]; then
+                CMD="$CMD --no-keep-epub"
+              fi
+            fi
+
+            # Execute conversion
+            echo "Running: $CMD"
+            eval $CMD
+
+            echo "Conversion complete for: $BASENAME"
+          done
+
+          echo ""
+          echo "All conversions complete. Output files:"
+          ls -la ./output/
+
+      - name: Upload EPUB artifacts
+        if: steps.prepare_input.outputs.skip_conversion != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-epub-${{ github.run_id }}
+          path: ./output/*.epub
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload AZW3 artifacts
+        if: steps.prepare_input.outputs.skip_conversion != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-azw3-${{ github.run_id }}
+          path: ./output/*.azw3
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: steps.prepare_input.outputs.skip_conversion != 'true'
+        run: |
+          echo "## Conversion Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ needs.validate.outputs.trigger_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Options Used" >> $GITHUB_STEP_SUMMARY
+          echo "| Option | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Add Pinyin | ${{ needs.validate.outputs.add_pinyin }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Add Translation | ${{ needs.validate.outputs.add_translation }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Translation Target | ${{ needs.validate.outputs.translation_target }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kindle Format | ${{ needs.validate.outputs.kindle_format }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| HSK4 Simplify | ${{ needs.validate.outputs.simplify_hsk4 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Use Claude | ${{ needs.validate.outputs.use_claude }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Use Opus | ${{ needs.validate.outputs.use_opus }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kindle Output | ${{ needs.validate.outputs.kindle_output }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Output Files" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la ./output/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download artifacts from the Actions run page." >> $GITHUB_STEP_SUMMARY
+
+  # Optional: Send notification to callback URL (for repository_dispatch)
+  notify:
+    name: Send Notification
+    needs: [validate, convert]
+    if: |
+      always() &&
+      github.event_name == 'repository_dispatch' &&
+      github.event.client_payload.callback_url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify callback URL
+        run: |
+          STATUS="completed"
+          if [ "${{ needs.convert.result }}" != "success" ]; then
+            STATUS="failed"
+          fi
+
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"status\": \"$STATUS\",
+              \"run_id\": \"${{ github.run_id }}\",
+              \"repository\": \"${{ github.repository }}\",
+              \"artifacts_url\": \"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+            }" || echo "Callback notification failed (non-fatal)"
