@@ -3,11 +3,18 @@ Chinese text processing: word segmentation and pinyin annotation.
 
 Uses jieba for segmentation and pypinyin for pinyin conversion.
 Outputs HTML with <ruby> tags for inline pinyin display.
+
+Word boundaries use U+200B (zero-width space) between Chinese words.
+This allows Kindle and other e-readers to identify word boundaries
+for dictionary lookup without visible spacing artifacts.
 """
 
 import re
 import jieba
 from pypinyin import pinyin, Style
+
+# Zero-width space: invisible but creates a word boundary for e-readers
+WORD_BOUNDARY = '\u200b'
 
 
 def is_chinese_char(char: str) -> bool:
@@ -65,10 +72,14 @@ def annotate_text(text: str, word_spacing: bool = False) -> str:
 
     Non-Chinese text (punctuation, numbers, Latin) is left unchanged.
 
+    Word spacing uses zero-width spaces (U+200B) between words to create
+    word boundaries that e-readers can use for dictionary lookup, without
+    visible spacing artifacts.
+
     Args:
         text: The text to annotate.
-        word_spacing: If True, adds spaces between Chinese words to help
-                      e-readers recognize word boundaries for dictionary lookup.
+        word_spacing: If True, adds zero-width spaces between Chinese words
+                      to help e-readers recognize word boundaries for lookup.
     """
     if not contains_chinese(text):
         return text
@@ -78,15 +89,19 @@ def annotate_text(text: str, word_spacing: bool = False) -> str:
     if not word_spacing:
         return ''.join(word_to_ruby_html(w) for w in words)
 
-    # With word spacing: add space between consecutive Chinese words
+    # With word spacing: wrap each Chinese word in a <span> and separate
+    # with zero-width spaces so Kindle can identify word boundaries
     result = []
     prev_was_chinese = False
     for word in words:
         word_is_chinese = contains_chinese(word)
-        # Add space before this word if both previous and current are Chinese
         if prev_was_chinese and word_is_chinese:
-            result.append(' ')
-        result.append(word_to_ruby_html(word))
+            result.append(WORD_BOUNDARY)
+        if word_is_chinese:
+            # Wrap entire word's ruby in a span for Kindle word selection
+            result.append(f'<span class="cw">{word_to_ruby_html(word)}</span>')
+        else:
+            result.append(word_to_ruby_html(word))
         prev_was_chinese = word_is_chinese
 
     return ''.join(result)
@@ -119,11 +134,12 @@ def text_to_spaced_chinese(text: str) -> str:
     Convert Chinese text to word-spaced format for better readability.
 
     Uses jieba segmentation to identify word boundaries and inserts
-    spaces between words. Handles mixed Chinese/English text properly.
+    zero-width spaces (U+200B) between words. This creates invisible
+    word boundaries that e-readers use for dictionary lookup and word
+    selection, without visible spacing artifacts.
 
     Example:
-        "我今天去北京" -> "我 今天 去 北京"
-        "我在D物流公司" -> "我 在 D物流 公司"
+        "我今天去北京" -> "我\u200b今天\u200b去\u200b北京"
     """
     if not contains_chinese(text):
         return text
@@ -136,9 +152,9 @@ def text_to_spaced_chinese(text: str) -> str:
         is_punct = _is_punctuation(word)
 
         if not is_punct:
-            # This is a word segment - add space if previous was also a word
+            # This is a word segment - add zero-width space if previous was also a word
             if prev_was_word and result:
-                result.append(' ')
+                result.append(WORD_BOUNDARY)
             result.append(word)
             prev_was_word = True
         else:
