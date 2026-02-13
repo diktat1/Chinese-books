@@ -6,3 +6,5 @@ beautifulsoup4>=4.12.0
 lxml>=4.9.0
 flask>=3.0.0
 anthropic>=0.40.0
+genanki>=0.13.0
+gTTS>=2.5.0

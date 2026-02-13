@@ -416,10 +416,23 @@ def _process_html_content(
     # (some EPUBs have the same image referenced multiple times)
     _deduplicate_html_images(soup)
 
-    # Find all paragraph-level elements that contain Chinese text
-    block_tags = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'caption', 'blockquote'])
+    # Find all block-level elements that contain Chinese text.
+    # "Leaf" blocks are always processed; "container" blocks (div, section, etc.)
+    # are only processed when they hold text directly (no nested block children),
+    # to avoid double-processing text that already lives inside a <p> or <li>.
+    _LEAF_BLOCKS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th',
+                    'caption', 'blockquote', 'dt', 'dd', 'figcaption', 'pre']
+    _CONTAINER_BLOCKS = ['div', 'section', 'article', 'aside', 'header', 'footer']
+    _ALL_BLOCKS = _LEAF_BLOCKS + _CONTAINER_BLOCKS
+
+    block_tags = soup.find_all(_ALL_BLOCKS)
 
     for block in block_tags:
+        # Skip containers that have nested block children — those children
+        # will be processed on their own pass through the loop.
+        if block.name in _CONTAINER_BLOCKS and block.find(_ALL_BLOCKS):
+            continue
+
         plain_text = block.get_text()
         if not contains_chinese(plain_text):
             continue
@@ -530,9 +543,8 @@ def _add_translation_to_block(
     """
     Add translation to any block element type.
 
-    For <p>, <h*>, <blockquote>: inserts a translation <div> after the block.
-    For <li>: appends an inline translation span inside the list item
-              (inserting a <p> after an <li> would break HTML structure).
+    For <p>, <h*>, <blockquote>, <div>, <section>, etc.: inserts a translation <div> after the block.
+    For <li>, <dt>, <dd>: appends inline translation span (siblings would break list structure).
     For <td>, <th>: appends inline translation inside the cell.
     """
     translation = _get_translation(
@@ -542,14 +554,15 @@ def _add_translation_to_block(
     if not translation:
         return
 
-    if block.name in ('li', 'td', 'th'):
-        # For list items and table cells, append translation inline
+    if block.name in ('li', 'td', 'th', 'dt', 'dd'):
+        # For list items, table cells, and definition list entries,
+        # append translation inline (inserting siblings would break structure)
         trans_span = soup.new_tag('span')
         trans_span['class'] = 'translation-inline'
         trans_span.string = translation
         block.append(trans_span)
     else:
-        # For p, h*, blockquote, caption: insert after block
+        # For p, h*, blockquote, caption, div, section, etc.: insert after block
         trans_div = soup.new_tag('div')
         trans_div['class'] = 'translation'
         trans_div.string = translation
@@ -570,12 +583,12 @@ def _process_block_kindle_format(
     """
     Process a block element using Kindle-optimized paragraph format.
 
-    For <p>, <h*>, <blockquote>, <caption>:
+    For <p>, <h*>, <blockquote>, <caption>, <div>, <section>, etc.:
         Inserts pinyin and translation as sibling elements after the block.
 
-    For <li>, <td>, <th>:
+    For <li>, <td>, <th>, <dt>, <dd>:
         Appends pinyin and translation inline inside the element
-        (inserting siblings would break list/table HTML structure).
+        (inserting siblings would break list/table/definition list structure).
 
     Uses zero-width spaces for word boundaries so Kindle can identify
     words for dictionary lookup.
@@ -590,7 +603,7 @@ def _process_block_kindle_format(
             use_claude_translator, use_opus,
         )
 
-    if block.name in ('li', 'td', 'th'):
+    if block.name in ('li', 'td', 'th', 'dt', 'dd'):
         # Inline mode: append pinyin and translation inside the element
         block.clear()
         block['class'] = block.get('class', [])

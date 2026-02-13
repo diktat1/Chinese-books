@@ -1,14 +1,6 @@
 {
-  "add_pinyin": true,
-  "add_translation": true,
-  "translation_source": "zh-CN",
   "translation_target": "fr",
   "word_spacing": true,
-  "kindle_format": true,
-  "simplify_hsk4": false,
-  "use_claude": false,
-  "use_opus": false,
-  "kindle_output": false,
-  "output_profile": "kindle_pw3",
-  "keep_epub": true
+  "kindle_format": false,
+  "generate_anki": false
 }

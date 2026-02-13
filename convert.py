@@ -46,6 +46,10 @@ Examples:
   python convert.py book.epub --simplify-hsk4          # Simplify to HSK 4 vocabulary (requires Claude)
   python convert.py book.epub --use-claude             # Use Claude for translation (higher quality)
   python convert.py book.epub --simplify-hsk4 --use-opus  # Use Opus model for best quality
+  python convert.py book.epub --anki                      # Generate Anki deck (sentence cards)
+  python convert.py book.epub --anki --target fr           # Anki deck with French translations
+  python convert.py book.epub --anki --no-audio            # Anki deck without TTS audio
+  python convert.py book.epub --anki --max-sentences 100   # Limit to first 100 sentences
         ''',
     )
 
@@ -122,6 +126,25 @@ Examples:
         help='Use Claude Opus model for highest quality (slower, more expensive). '
              'Applies to both HSK simplification and Claude translation.',
     )
+    # Anki deck generation
+    parser.add_argument(
+        '--anki',
+        action='store_true',
+        help='Generate an Anki deck (.apkg) with sentence cards. '
+             'Front: Chinese + audio. Back: pinyin + translation.',
+    )
+    parser.add_argument(
+        '--no-audio',
+        action='store_true',
+        help='Skip TTS audio generation for Anki cards (faster)',
+    )
+    parser.add_argument(
+        '--max-sentences',
+        type=int,
+        default=0,
+        help='Maximum number of sentences for Anki deck (0 = all)',
+    )
+
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
@@ -162,6 +185,39 @@ Examples:
             print('Error: ANTHROPIC_API_KEY environment variable not set.', file=sys.stderr)
             print('Get your API key from https://console.anthropic.com/', file=sys.stderr)
             sys.exit(1)
+
+    # Anki deck mode - separate flow
+    if args.anki:
+        from graded_reader.anki_generator import generate_anki_deck
+
+        if args.output:
+            anki_output = Path(args.output)
+            if anki_output.suffix.lower() != '.apkg':
+                anki_output = anki_output.with_suffix('.apkg')
+        else:
+            anki_output = input_path.with_stem(input_path.stem + '_anki').with_suffix('.apkg')
+
+        print(f'Input:  {input_path}')
+        print(f'Output: {anki_output}')
+        print(f'Mode:   Anki deck ({args.source} -> {args.target})')
+        if not args.no_audio:
+            print(f'Audio:  TTS enabled (Chinese)')
+        if args.max_sentences:
+            print(f'Limit:  {args.max_sentences} sentences')
+        print()
+
+        generate_anki_deck(
+            epub_path=str(input_path),
+            output_path=str(anki_output),
+            translation_target=args.target,
+            translation_source=args.source,
+            use_claude=args.use_claude,
+            use_opus=args.use_opus,
+            include_audio=not args.no_audio,
+            max_sentences=args.max_sentences,
+        )
+        print(f'\nAnki deck written to: {anki_output}')
+        return
 
     # Determine output paths
     if args.kindle:
