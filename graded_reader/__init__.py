@@ -14,6 +14,9 @@ from .claude_simplifier import (
 from .claude_translator import (
     translate_text_claude,
 )
+from .audio_generator import (
+    generate_audiobook,
+)
 
 __all__ = [
     'is_calibre_installed',
@@ -24,4 +27,5 @@ __all__ = [
     'analyze_vocabulary_level',
     'is_anthropic_available',
     'translate_text_claude',
+    'generate_audiobook',
 ]

@@ -37,6 +37,10 @@ on:
         description: 'Also generate Anki flashcard deck'
         type: boolean
         default: false
+      generate_audio:
+        description: 'Also generate audiobook (edge-tts, bilingual)'
+        type: boolean
+        default: false
 
   # API trigger for external systems
   repository_dispatch:
@@ -66,6 +70,7 @@ jobs:
       trigger_type: ${{ steps.params.outputs.trigger_type }}
       translate_to: ${{ steps.params.outputs.translate_to }}
       generate_anki: ${{ steps.params.outputs.generate_anki }}
+      generate_audio: ${{ steps.params.outputs.generate_audio }}
       add_pinyin: ${{ steps.params.outputs.add_pinyin }}
       add_translation: ${{ steps.params.outputs.add_translation }}
       word_spacing: ${{ steps.params.outputs.word_spacing }}
@@ -85,6 +90,7 @@ jobs:
             echo "artifact_name=${{ inputs.artifact_name }}" >> $GITHUB_OUTPUT
             echo "translate_to=${{ inputs.translate_to }}" >> $GITHUB_OUTPUT
             echo "generate_anki=${{ inputs.generate_anki }}" >> $GITHUB_OUTPUT
+            echo "generate_audio=${{ inputs.generate_audio }}" >> $GITHUB_OUTPUT
 
             # Smart defaults: always enable pinyin + translation + word spacing
             echo "add_pinyin=true" >> $GITHUB_OUTPUT
@@ -123,6 +129,9 @@ jobs:
             GENERATE_ANKI="${{ github.event.client_payload.generate_anki }}"
             echo "generate_anki=${GENERATE_ANKI:-false}" >> $GITHUB_OUTPUT
 
+            GENERATE_AUDIO="${{ github.event.client_payload.generate_audio }}"
+            echo "generate_audio=${GENERATE_AUDIO:-false}" >> $GITHUB_OUTPUT
+
             ADD_PINYIN="${{ github.event.client_payload.add_pinyin }}"
             echo "add_pinyin=${ADD_PINYIN:-true}" >> $GITHUB_OUTPUT
             ADD_TRANSLATION="${{ github.event.client_payload.add_translation }}"
@@ -142,6 +151,7 @@ jobs:
             echo "epub_filename=" >> $GITHUB_OUTPUT
             echo "artifact_name=" >> $GITHUB_OUTPUT
             echo "generate_anki=false" >> $GITHUB_OUTPUT
+            echo "generate_audio=false" >> $GITHUB_OUTPUT
 
             # Load from config.json if present, otherwise use defaults
             if [ -f "./input-epubs/config.json" ]; then
@@ -326,6 +336,7 @@ jobs:
             echo "| Quality | standard (Google Translate) |" >> $GITHUB_STEP_SUMMARY
           fi
           echo "| Anki deck | ${{ needs.prepare.outputs.generate_anki }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Audiobook | ${{ needs.prepare.outputs.generate_audio }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Output Files" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
@@ -391,9 +402,66 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+  audio:
+    name: Generate Audiobook
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.generate_audio == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download input files
+        uses: actions/download-artifact@v4
+        with:
+          name: input-epubs-${{ github.run_id }}
+          path: ./input
+
+      - name: Generate audiobook
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p ./output
+          TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
+          USE_CLAUDE="${{ needs.prepare.outputs.use_claude }}"
+          USE_OPUS="${{ needs.prepare.outputs.use_opus }}"
+
+          for INPUT_FILE in ./input/*.epub; do
+            [ -f "$INPUT_FILE" ] || continue
+
+            BASENAME=$(basename "$INPUT_FILE" .epub)
+            AUDIO_FILE="./output/${BASENAME}_audiobook.zip"
+
+            echo "Generating audiobook: $AUDIO_FILE"
+
+            CMD="python convert.py \"$INPUT_FILE\" -o \"$AUDIO_FILE\" --audio --target \"$TRANSLATE_TO\""
+            [ "$USE_CLAUDE" == "true" ] && CMD="$CMD --use-claude"
+            [ "$USE_OPUS" == "true" ] && CMD="$CMD --use-opus"
+
+            eval $CMD
+          done
+
+      - name: Upload audiobook artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiobook-${{ github.run_id }}
+          path: ./output/*.zip
+          retention-days: 30
+          if-no-files-found: warn
+
   notify:
     name: Send Notification
-    needs: [convert, anki]
+    needs: [convert, anki, audio]
     if: |
       always() &&
       github.event_name == 'repository_dispatch' &&
