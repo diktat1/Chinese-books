@@ -33,12 +33,16 @@ on:
           - premium (Claude Sonnet)
           - simplified (Claude + HSK 4)
         default: 'standard (Google Translate)'
+      generate_epub:
+        description: 'Generate graded reader EPUB'
+        type: boolean
+        default: true
       generate_anki:
-        description: 'Also generate Anki flashcard deck'
+        description: 'Generate Anki flashcard deck'
         type: boolean
         default: false
       generate_audio:
-        description: 'Also generate audiobook (edge-tts, bilingual)'
+        description: 'Generate audiobook (edge-tts, bilingual)'
         type: boolean
         default: false
 
@@ -69,6 +73,7 @@ jobs:
       skip: ${{ steps.prepare.outputs.skip }}
       trigger_type: ${{ steps.params.outputs.trigger_type }}
       translate_to: ${{ steps.params.outputs.translate_to }}
+      generate_epub: ${{ steps.params.outputs.generate_epub }}
       generate_anki: ${{ steps.params.outputs.generate_anki }}
       generate_audio: ${{ steps.params.outputs.generate_audio }}
       add_pinyin: ${{ steps.params.outputs.add_pinyin }}
@@ -89,6 +94,7 @@ jobs:
             echo "epub_filename=${{ inputs.epub_filename }}" >> $GITHUB_OUTPUT
             echo "artifact_name=${{ inputs.artifact_name }}" >> $GITHUB_OUTPUT
             echo "translate_to=${{ inputs.translate_to }}" >> $GITHUB_OUTPUT
+            echo "generate_epub=${{ inputs.generate_epub }}" >> $GITHUB_OUTPUT
             echo "generate_anki=${{ inputs.generate_anki }}" >> $GITHUB_OUTPUT
             echo "generate_audio=${{ inputs.generate_audio }}" >> $GITHUB_OUTPUT
 
@@ -126,6 +132,9 @@ jobs:
             echo "artifact_name=${{ github.event.client_payload.artifact_name }}" >> $GITHUB_OUTPUT
             echo "translate_to=${TRANSLATE_TO:-fr}" >> $GITHUB_OUTPUT
 
+            GENERATE_EPUB="${{ github.event.client_payload.generate_epub }}"
+            echo "generate_epub=${GENERATE_EPUB:-true}" >> $GITHUB_OUTPUT
+
             GENERATE_ANKI="${{ github.event.client_payload.generate_anki }}"
             echo "generate_anki=${GENERATE_ANKI:-false}" >> $GITHUB_OUTPUT
 
@@ -150,6 +159,7 @@ jobs:
             echo "trigger_type=push" >> $GITHUB_OUTPUT
             echo "epub_filename=" >> $GITHUB_OUTPUT
             echo "artifact_name=" >> $GITHUB_OUTPUT
+            echo "generate_epub=true" >> $GITHUB_OUTPUT
             echo "generate_anki=false" >> $GITHUB_OUTPUT
             echo "generate_audio=false" >> $GITHUB_OUTPUT
 
@@ -250,7 +260,7 @@ jobs:
   convert:
     name: Convert EPUB
     needs: prepare
-    if: needs.prepare.outputs.skip != 'true'
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.generate_epub == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
