@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Chinese Graded Reader</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#333;padding:16px}
+.card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:24px;max-width:500px;margin:0 auto 16px}
+h1{font-size:1.3em;margin-bottom:4px}
+.sub{color:#888;font-size:.9em;margin-bottom:20px}
+label{display:block;padding:6px 0;font-size:.95em;cursor:pointer}
+label input[type=checkbox]{margin-right:8px}
+input[type=text],input[type=password],select{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:8px;font-size:1em;margin-bottom:8px;-webkit-appearance:none}
+.file-pick{border:2px dashed #ccc;border-radius:8px;padding:32px 16px;text-align:center;cursor:pointer;margin-bottom:16px;transition:all .2s}
+.file-pick.active{border-color:#e74c3c;background:#fef5f5}
+.file-pick .icon{font-size:2em;margin-bottom:8px}
+.file-pick .name{font-weight:600;color:#333;margin-top:8px;word-break:break-all}
+.file-pick input{display:none}
+button{background:#e74c3c;color:#fff;border:none;padding:14px;border-radius:8px;font-size:1em;cursor:pointer;width:100%;transition:background .2s;font-weight:600}
+button:hover{background:#c0392b}
+button:disabled{background:#ccc;cursor:not-allowed}
+.msg{margin-top:12px;padding:12px;border-radius:8px;font-size:.9em;display:none}
+.msg.info{display:block;background:#fff3cd;color:#856404}
+.msg.ok{display:block;background:#d4edda;color:#155724}
+.msg.err{display:block;background:#f8d7da;color:#721c24}
+.msg a{color:inherit;font-weight:700}
+.section{margin-bottom:16px}
+.section-title{font-weight:600;font-size:.95em;margin-bottom:6px;color:#555}
+hr{border:none;border-top:1px solid #eee;margin:12px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.grid label{padding:4px 0}
+.small{font-size:.8em;color:#999;margin-top:8px;line-height:1.4}
+.setup-link{text-align:center;margin-top:8px}
+.setup-link a{color:#e74c3c;font-size:.85em}
+.token-row{display:flex;gap:8px}
+.token-row input{flex:1;margin-bottom:0}
+.token-row button{width:auto;padding:10px 16px;font-size:.9em}
+.hidden{display:none}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Chinese Graded Reader</h1>
+  <p class="sub">Convert Chinese EPUBs with pinyin + translation</p>
+
+  <!-- Setup: GitHub token (one-time) -->
+  <div id="setupCard">
+    <div class="section">
+      <div class="section-title">GitHub Setup (one-time)</div>
+      <div class="token-row">
+        <input type="password" id="token" placeholder="GitHub personal access token">
+        <button id="saveToken" style="background:#333">Save</button>
+      </div>
+      <div class="grid" style="margin-top:8px">
+        <input type="text" id="owner" placeholder="GitHub username">
+        <input type="text" id="repo" value="Chinese-books" placeholder="Repo name">
+      </div>
+      <p class="small">Token needs <strong>repo</strong> scope. Create at GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic).</p>
+    </div>
+  </div>
+
+  <!-- Token saved indicator -->
+  <div id="tokenSaved" class="hidden" style="margin-bottom:12px">
+    <span style="color:#155724;font-size:.9em">Token saved</span>
+    <a href="#" id="changeToken" style="float:right;font-size:.85em;color:#e74c3c">Change</a>
+  </div>
+</div>
+
+<div class="card">
+  <!-- File picker -->
+  <div class="file-pick" id="dropZone">
+    <div class="icon">&#128214;</div>
+    <p>Tap to select EPUB file</p>
+    <div class="name" id="fileName"></div>
+    <input type="file" id="fileInput" accept=".epub">
+  </div>
+
+  <!-- Options -->
+  <div class="section">
+    <div class="section-title">Options</div>
+    <div class="grid">
+      <label><input type="checkbox" id="optPinyin" checked> Pinyin</label>
+      <label><input type="checkbox" id="optTranslation" checked> Translation</label>
+      <label><input type="checkbox" id="optWordSpacing" checked> Word spacing</label>
+      <label><input type="checkbox" id="optKindleFormat" checked> Kindle format</label>
+    </div>
+    <hr>
+    <div class="grid">
+      <div>
+        <div class="section-title">Target language</div>
+        <select id="optTarget">
+          <option value="fr" selected>French</option>
+          <option value="en">English</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+          <option value="de">German</option>
+          <option value="es">Spanish</option>
+          <option value="it">Italian</option>
+          <option value="pt">Portuguese</option>
+        </select>
+      </div>
+      <div>
+        <div class="section-title">Kindle profile</div>
+        <select id="optProfile">
+          <option value="kindle_pw3" selected>Paperwhite 3+</option>
+          <option value="kindle_oasis">Oasis</option>
+          <option value="kindle_scribe">Scribe</option>
+          <option value="kindle_fire">Fire</option>
+          <option value="kindle">Basic</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <hr>
+
+  <div class="section">
+    <div class="section-title">Method</div>
+    <label><input type="radio" name="method" value="push" checked> <strong>Push trigger</strong> &mdash; upload to repo, auto-converts</label>
+    <label><input type="radio" name="method" value="dispatch"> <strong>Workflow dispatch</strong> &mdash; trigger manually with options</label>
+  </div>
+
+  <button id="convertBtn" disabled>Upload &amp; Convert</button>
+
+  <div class="msg" id="status"></div>
+</div>
+
+<div class="card">
+  <div class="section-title">How it works</div>
+  <p class="small">
+    1. Your EPUB is uploaded to the <code>input-epubs/</code> folder in your GitHub repo<br>
+    2. GitHub Actions automatically converts it (pinyin, translation, word spacing)<br>
+    3. Download the result from the Actions page (artifact link below)<br><br>
+    Conversion takes 1-10 minutes depending on book size and whether translation is enabled.
+  </p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// Persist settings in localStorage
+function loadSettings() {
+  const t = localStorage.getItem('gh_token');
+  const o = localStorage.getItem('gh_owner');
+  const r = localStorage.getItem('gh_repo');
+  if (t) {
+    $('token').value = t;
+    $('owner').value = o || '';
+    $('repo').value = r || 'Chinese-books';
+    showTokenSaved();
+  }
+}
+
+function showTokenSaved() {
+  $('setupCard').classList.add('hidden');
+  $('tokenSaved').classList.remove('hidden');
+}
+
+function showTokenSetup() {
+  $('setupCard').classList.remove('hidden');
+  $('tokenSaved').classList.add('hidden');
+}
+
+$('saveToken').onclick = () => {
+  const t = $('token').value.trim();
+  const o = $('owner').value.trim();
+  const r = $('repo').value.trim();
+  if (!t || !o) { alert('Enter token and username'); return; }
+  localStorage.setItem('gh_token', t);
+  localStorage.setItem('gh_owner', o);
+  localStorage.setItem('gh_repo', r || 'Chinese-books');
+  showTokenSaved();
+};
+
+$('changeToken').onclick = (e) => { e.preventDefault(); showTokenSetup(); };
+
+// File picker
+const dropZone = $('dropZone');
+const fileInput = $('fileInput');
+let selectedFile = null;
+
+dropZone.onclick = () => fileInput.click();
+fileInput.onchange = () => {
+  if (fileInput.files.length) {
+    selectedFile = fileInput.files[0];
+    $('fileName').textContent = selectedFile.name;
+    dropZone.classList.add('active');
+    $('convertBtn').disabled = false;
+  }
+};
+
+// Convert
+$('convertBtn').onclick = async () => {
+  if (!selectedFile) return;
+  const token = localStorage.getItem('gh_token');
+  const owner = localStorage.getItem('gh_owner');
+  const repo = localStorage.getItem('gh_repo') || 'Chinese-books';
+  if (!token || !owner) { showTokenSetup(); alert('Set up GitHub token first'); return; }
+
+  const method = document.querySelector('input[name=method]:checked').value;
+  const btn = $('convertBtn');
+  const status = $('status');
+
+  btn.disabled = true;
+  btn.textContent = 'Uploading...';
+  status.className = 'msg info';
+  status.style.display = 'block';
+  status.textContent = 'Reading file...';
+
+  try {
+    // Read file as base64
+    const base64 = await fileToBase64(selectedFile);
+    const fileName = selectedFile.name;
+    const path = `input-epubs/${fileName}`;
+
+    status.textContent = 'Uploading to GitHub...';
+
+    // Check if file already exists (need its SHA to update)
+    let sha = null;
+    try {
+      const existing = await ghApi(`/repos/${owner}/${repo}/contents/${path}`, token);
+      sha = existing.sha;
+    } catch(e) { /* file doesn't exist yet, that's fine */ }
+
+    // Upload file via Contents API
+    const body = {
+      message: `Add ${fileName} for conversion`,
+      content: base64,
+      branch: 'main'
+    };
+    if (sha) body.sha = sha;
+
+    await ghApi(`/repos/${owner}/${repo}/contents/${path}`, token, 'PUT', body);
+
+    if (method === 'push') {
+      // Push trigger: also update config.json with current options
+      await updateConfig(owner, repo, token);
+      status.className = 'msg ok';
+      status.innerHTML = `Uploaded! Workflow triggered automatically.<br><br>` +
+        `<a href="https://github.com/${owner}/${repo}/actions" target="_blank">` +
+        `View progress &amp; download result &rarr;</a>`;
+    } else {
+      // Workflow dispatch
+      status.textContent = 'Triggering workflow...';
+      await ghApi(`/repos/${owner}/${repo}/actions/workflows/convert-epub.yml/dispatches`, token, 'POST', {
+        ref: 'main',
+        inputs: {
+          epub_filename: fileName,
+          add_pinyin: String($('optPinyin').checked),
+          add_translation: String($('optTranslation').checked),
+          translation_source: 'zh-CN',
+          translation_target: $('optTarget').value,
+          word_spacing: String($('optWordSpacing').checked),
+          kindle_format: String($('optKindleFormat').checked),
+          kindle_output: 'false',
+          output_profile: $('optProfile').value,
+          simplify_hsk4: 'false',
+          use_claude: 'false',
+          use_opus: 'false',
+          keep_epub: 'true'
+        }
+      });
+      status.className = 'msg ok';
+      status.innerHTML = `Uploaded &amp; workflow triggered!<br><br>` +
+        `<a href="https://github.com/${owner}/${repo}/actions" target="_blank">` +
+        `View progress &amp; download result &rarr;</a>`;
+    }
+  } catch(err) {
+    status.className = 'msg err';
+    status.textContent = 'Error: ' + err.message;
+    console.error(err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Upload & Convert';
+  }
+};
+
+async function updateConfig(owner, repo, token) {
+  const config = {
+    add_pinyin: $('optPinyin').checked,
+    add_translation: $('optTranslation').checked,
+    translation_source: 'zh-CN',
+    translation_target: $('optTarget').value,
+    word_spacing: $('optWordSpacing').checked,
+    kindle_format: $('optKindleFormat').checked,
+    simplify_hsk4: false,
+    use_claude: false,
+    use_opus: false,
+    kindle_output: false,
+    output_profile: $('optProfile').value,
+    keep_epub: true
+  };
+  const content = btoa(JSON.stringify(config, null, 2) + '\n');
+  const path = 'input-epubs/config.json';
+
+  let sha = null;
+  try {
+    const existing = await ghApi(`/repos/${owner}/${repo}/contents/${path}`, token);
+    sha = existing.sha;
+  } catch(e) {}
+
+  const body = { message: 'Update conversion config', content, branch: 'main' };
+  if (sha) body.sha = sha;
+  await ghApi(`/repos/${owner}/${repo}/contents/${path}`, token, 'PUT', body);
+}
+
+async function ghApi(endpoint, token, method = 'GET', body = null) {
+  const url = endpoint.startsWith('http') ? endpoint : `https://api.github.com${endpoint}`;
+  const opts = {
+    method,
+    headers: {
+      'Authorization': `token ${token}`,
+      'Accept': 'application/vnd.github.v3+json',
+    }
+  };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(url, opts);
+  if (method === 'POST' && resp.status === 204) return {};
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`GitHub API ${resp.status}: ${text.substring(0, 200)}`);
+  }
+  const ct = resp.headers.get('content-type');
+  if (ct && ct.includes('json')) return resp.json();
+  return {};
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+loadSettings();
+</script>
+</body>
+</html>

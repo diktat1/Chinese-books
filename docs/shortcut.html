@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>iOS Shortcut Setup - Chinese Graded Reader</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#333;padding:16px;line-height:1.6}
+.card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:24px;max-width:500px;margin:0 auto 16px}
+h1{font-size:1.3em;margin-bottom:4px}
+h2{font-size:1.1em;margin:16px 0 8px;color:#555}
+.sub{color:#888;font-size:.9em;margin-bottom:20px}
+.step{background:#f8f8f8;border-radius:8px;padding:16px;margin-bottom:12px}
+.step-num{display:inline-block;background:#e74c3c;color:#fff;width:28px;height:28px;line-height:28px;text-align:center;border-radius:50%;font-weight:700;font-size:.9em;margin-right:8px}
+code{background:#e8e8e8;padding:2px 6px;border-radius:4px;font-size:.85em}
+.note{background:#fff3cd;padding:12px;border-radius:8px;font-size:.85em;color:#856404;margin:12px 0}
+input[type=text],input[type=password]{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:8px;font-size:1em;margin:4px 0 8px}
+button{background:#e74c3c;color:#fff;border:none;padding:14px;border-radius:8px;font-size:1em;cursor:pointer;width:100%;font-weight:600;margin-top:8px}
+.small{font-size:.8em;color:#999;line-height:1.4}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>iOS Shortcut Setup</h1>
+  <p class="sub">Convert Chinese EPUBs from the Share Sheet or Files app</p>
+
+  <div class="note">
+    This shortcut lets you select any EPUB from your iPhone (Files, Safari downloads, email attachments) and send it for conversion with one tap.
+  </div>
+
+  <h2>What you need</h2>
+  <p>A GitHub personal access token with <strong>repo</strong> scope. Create one at:<br>
+  GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic)</p>
+</div>
+
+<div class="card">
+  <h2>Build the Shortcut</h2>
+  <p class="sub">Open the Shortcuts app and create a new shortcut with these steps:</p>
+
+  <div class="step">
+    <span class="step-num">1</span>
+    <strong>Receive input from Share Sheet</strong><br>
+    <span class="small">Types: Files. If there is no input: Ask to select files.</span>
+  </div>
+
+  <div class="step">
+    <span class="step-num">2</span>
+    <strong>Set variable</strong> <code>FileName</code> to <code>Name of Shortcut Input</code>
+  </div>
+
+  <div class="step">
+    <span class="step-num">3</span>
+    <strong>Base64 Encode</strong> the Shortcut Input<br>
+    <span class="small">Line Break: None</span>
+  </div>
+
+  <div class="step">
+    <span class="step-num">4</span>
+    <strong>Set variable</strong> <code>FileBase64</code> to <code>Base64 Encoded</code>
+  </div>
+
+  <div class="step">
+    <span class="step-num">5</span>
+    <strong>Get Contents of URL</strong> (check if file exists)<br>
+    URL: <code style="word-break:break-all">https://api.github.com/repos/OWNER/Chinese-books/contents/input-epubs/[FileName]</code><br>
+    Method: GET<br>
+    Headers: <code>Authorization: token YOUR_TOKEN</code><br>
+    <span class="small">Replace OWNER and YOUR_TOKEN with your values. This step may fail if the file is new - that's OK.</span>
+  </div>
+
+  <div class="step">
+    <span class="step-num">6</span>
+    <strong>Get Dictionary Value</strong> for key <code>sha</code> from step 5 result<br>
+    <strong>Set variable</strong> <code>FileSha</code><br>
+    <span class="small">This may be empty for new files.</span>
+  </div>
+
+  <div class="step">
+    <span class="step-num">7</span>
+    <strong>Text</strong> — build the JSON body:<br>
+    <code style="word-break:break-all;display:block;margin-top:4px;padding:8px;background:#fff">{"message":"Add [FileName] for conversion","content":"[FileBase64]","sha":"[FileSha]","branch":"main"}</code>
+    <span class="small">Use the variables from earlier steps. If FileSha is empty, remove the sha field or set it to "".</span>
+  </div>
+
+  <div class="step">
+    <span class="step-num">8</span>
+    <strong>Get Contents of URL</strong> (upload file)<br>
+    URL: <code style="word-break:break-all">https://api.github.com/repos/OWNER/Chinese-books/contents/input-epubs/[FileName]</code><br>
+    Method: PUT<br>
+    Headers: <code>Authorization: token YOUR_TOKEN</code>, <code>Content-Type: application/json</code><br>
+    Request Body: the Text from step 7
+  </div>
+
+  <div class="step">
+    <span class="step-num">9</span>
+    <strong>Show Notification</strong><br>
+    Title: "EPUB uploaded!"<br>
+    Body: "Check GitHub Actions for your converted file."
+  </div>
+
+  <div class="step">
+    <span class="step-num">10</span>
+    <strong>Open URL</strong><br>
+    <code style="word-break:break-all">https://github.com/OWNER/Chinese-books/actions</code>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Quick alternative</h2>
+  <p>If building the Shortcut feels complex, use the <a href="index.html">web interface</a> instead. It does the same thing in your browser &mdash; just bookmark it to your home screen.</p>
+</div>
+
+</body>
+</html>
