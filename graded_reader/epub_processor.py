@@ -417,20 +417,20 @@ def _process_html_content(
     _deduplicate_html_images(soup)
 
     # Find all block-level elements that contain Chinese text.
-    # "Leaf" blocks are always processed; "container" blocks (div, section, etc.)
-    # are only processed when they hold text directly (no nested block children),
-    # to avoid double-processing text that already lives inside a <p> or <li>.
-    _LEAF_BLOCKS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th',
-                    'caption', 'blockquote', 'dt', 'dd', 'figcaption', 'pre']
-    _CONTAINER_BLOCKS = ['div', 'section', 'article', 'aside', 'header', 'footer']
-    _ALL_BLOCKS = _LEAF_BLOCKS + _CONTAINER_BLOCKS
+    # Any block that has nested block children is skipped — those children
+    # will be processed on their own pass through the loop. This prevents
+    # duplicate translations (e.g. <blockquote><p>text</p></blockquote>
+    # would otherwise translate both the blockquote and the p).
+    _ALL_BLOCKS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th',
+                   'caption', 'blockquote', 'dt', 'dd', 'figcaption', 'pre',
+                   'div', 'section', 'article', 'aside', 'header', 'footer']
 
     block_tags = soup.find_all(_ALL_BLOCKS)
 
     for block in block_tags:
-        # Skip containers that have nested block children — those children
+        # Skip any block that has nested block children — those children
         # will be processed on their own pass through the loop.
-        if block.name in _CONTAINER_BLOCKS and block.find(_ALL_BLOCKS):
+        if block.find(_ALL_BLOCKS):
             continue
 
         plain_text = block.get_text()
@@ -542,10 +542,12 @@ def _add_translation_to_block(
 ) -> None:
     """
     Add translation to any block element type.
+    Translation is placed BEFORE the Chinese text so the reader sees the
+    target language first, then the Chinese with pinyin.
 
-    For <p>, <h*>, <blockquote>, <div>, <section>, etc.: inserts a translation <div> after the block.
-    For <li>, <dt>, <dd>: appends inline translation span (siblings would break list structure).
-    For <td>, <th>: appends inline translation inside the cell.
+    For <p>, <h*>, <blockquote>, <div>, <section>, etc.: inserts a translation <div> before the block.
+    For <li>, <dt>, <dd>: prepends inline translation span (siblings would break list structure).
+    For <td>, <th>: prepends inline translation inside the cell.
     """
     translation = _get_translation(
         plain_text, translation_source, translation_target,
@@ -556,17 +558,17 @@ def _add_translation_to_block(
 
     if block.name in ('li', 'td', 'th', 'dt', 'dd'):
         # For list items, table cells, and definition list entries,
-        # append translation inline (inserting siblings would break structure)
+        # prepend translation inline (inserting siblings would break structure)
         trans_span = soup.new_tag('span')
         trans_span['class'] = 'translation-inline'
         trans_span.string = translation
-        block.append(trans_span)
+        block.insert(0, trans_span)
     else:
-        # For p, h*, blockquote, caption, div, section, etc.: insert after block
+        # For p, h*, blockquote, caption, div, section, etc.: insert before block
         trans_div = soup.new_tag('div')
         trans_div['class'] = 'translation'
         trans_div.string = translation
-        block.insert_after(trans_div)
+        block.insert_before(trans_div)
 
 
 def _process_block_kindle_format(
@@ -582,12 +584,13 @@ def _process_block_kindle_format(
 ) -> None:
     """
     Process a block element using Kindle-optimized paragraph format.
+    Order: Translation (target language) → Chinese text → Pinyin.
 
     For <p>, <h*>, <blockquote>, <caption>, <div>, <section>, etc.:
-        Inserts pinyin and translation as sibling elements after the block.
+        Inserts translation before and pinyin after the block.
 
     For <li>, <td>, <th>, <dt>, <dd>:
-        Appends pinyin and translation inline inside the element
+        Prepends translation and appends pinyin inline inside the element
         (inserting siblings would break list/table/definition list structure).
 
     Uses zero-width spaces for word boundaries so Kindle can identify
@@ -604,12 +607,19 @@ def _process_block_kindle_format(
         )
 
     if block.name in ('li', 'td', 'th', 'dt', 'dd'):
-        # Inline mode: append pinyin and translation inside the element
+        # Inline mode: translation first, then Chinese, then pinyin
         block.clear()
         block['class'] = block.get('class', [])
         if isinstance(block['class'], str):
             block['class'] = [block['class']]
         block['class'].append('chinese-text')
+
+        if translation:
+            trans_span = soup.new_tag('span')
+            trans_span['class'] = 'translation-inline'
+            trans_span.string = translation
+            block.append(trans_span)
+
         block.append(NavigableString(spaced_chinese))
 
         if pinyin_text:
@@ -617,28 +627,8 @@ def _process_block_kindle_format(
             pinyin_span['class'] = 'pinyin-inline'
             pinyin_span.string = pinyin_text
             block.append(pinyin_span)
-
-        if translation:
-            trans_span = soup.new_tag('span')
-            trans_span['class'] = 'translation-inline'
-            trans_span.string = translation
-            block.append(trans_span)
     else:
-        # Sibling mode: insert pinyin and translation after block
-        elements_to_insert = []
-
-        if pinyin_text:
-            pinyin_p = soup.new_tag('p')
-            pinyin_p['class'] = 'pinyin-text'
-            pinyin_p.string = pinyin_text
-            elements_to_insert.append(pinyin_p)
-
-        if translation:
-            trans_div = soup.new_tag('div')
-            trans_div['class'] = 'translation'
-            trans_div.string = translation
-            elements_to_insert.append(trans_div)
-
+        # Sibling mode: translation before block, pinyin after block
         # Update the original block with word-spaced Chinese
         parent = block.parent
         block.clear()
@@ -649,5 +639,16 @@ def _process_block_kindle_format(
         block.string = spaced_chinese
 
         if parent is not None and block.parent is not None:
-            for elem in reversed(elements_to_insert):
-                block.insert_after(elem)
+            # Insert pinyin after Chinese block
+            if pinyin_text:
+                pinyin_p = soup.new_tag('p')
+                pinyin_p['class'] = 'pinyin-text'
+                pinyin_p.string = pinyin_text
+                block.insert_after(pinyin_p)
+
+            # Insert translation before Chinese block
+            if translation:
+                trans_div = soup.new_tag('div')
+                trans_div['class'] = 'translation'
+                trans_div.string = translation
+                block.insert_before(trans_div)
