@@ -25,13 +25,6 @@ on:
           - it
           - pt
         default: 'fr'
-      output_format:
-        description: 'Output format'
-        type: choice
-        options:
-          - epub
-          - kindle
-        default: 'epub'
       quality:
         description: 'Quality level'
         type: choice
@@ -42,6 +35,10 @@ on:
         default: 'standard (Google Translate)'
       generate_anki:
         description: 'Also generate Anki flashcard deck'
+        type: boolean
+        default: false
+      generate_audio:
+        description: 'Also generate audiobook (edge-tts, bilingual)'
         type: boolean
         default: false
 
@@ -64,23 +61,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  convert:
-    name: Convert EPUB
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 10
+    outputs:
+      skip: ${{ steps.prepare.outputs.skip }}
+      trigger_type: ${{ steps.params.outputs.trigger_type }}
+      translate_to: ${{ steps.params.outputs.translate_to }}
+      generate_anki: ${{ steps.params.outputs.generate_anki }}
+      generate_audio: ${{ steps.params.outputs.generate_audio }}
+      add_pinyin: ${{ steps.params.outputs.add_pinyin }}
+      add_translation: ${{ steps.params.outputs.add_translation }}
+      word_spacing: ${{ steps.params.outputs.word_spacing }}
+      simplify_hsk4: ${{ steps.params.outputs.simplify_hsk4 }}
+      use_claude: ${{ steps.params.outputs.use_claude }}
+      use_opus: ${{ steps.params.outputs.use_opus }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
 
       - name: Resolve parameters
         id: params
@@ -90,14 +89,13 @@ jobs:
             echo "epub_filename=${{ inputs.epub_filename }}" >> $GITHUB_OUTPUT
             echo "artifact_name=${{ inputs.artifact_name }}" >> $GITHUB_OUTPUT
             echo "translate_to=${{ inputs.translate_to }}" >> $GITHUB_OUTPUT
-            echo "output_format=${{ inputs.output_format }}" >> $GITHUB_OUTPUT
             echo "generate_anki=${{ inputs.generate_anki }}" >> $GITHUB_OUTPUT
+            echo "generate_audio=${{ inputs.generate_audio }}" >> $GITHUB_OUTPUT
 
             # Smart defaults: always enable pinyin + translation + word spacing
             echo "add_pinyin=true" >> $GITHUB_OUTPUT
             echo "add_translation=true" >> $GITHUB_OUTPUT
             echo "word_spacing=true" >> $GITHUB_OUTPUT
-            echo "kindle_format=false" >> $GITHUB_OUTPUT
 
             # Map quality choice to internal flags
             QUALITY="${{ inputs.quality }}"
@@ -128,11 +126,11 @@ jobs:
             echo "artifact_name=${{ github.event.client_payload.artifact_name }}" >> $GITHUB_OUTPUT
             echo "translate_to=${TRANSLATE_TO:-fr}" >> $GITHUB_OUTPUT
 
-            OUTPUT_FORMAT="${{ github.event.client_payload.output_format }}"
-            echo "output_format=${OUTPUT_FORMAT:-epub}" >> $GITHUB_OUTPUT
-
             GENERATE_ANKI="${{ github.event.client_payload.generate_anki }}"
             echo "generate_anki=${GENERATE_ANKI:-false}" >> $GITHUB_OUTPUT
+
+            GENERATE_AUDIO="${{ github.event.client_payload.generate_audio }}"
+            echo "generate_audio=${GENERATE_AUDIO:-false}" >> $GITHUB_OUTPUT
 
             ADD_PINYIN="${{ github.event.client_payload.add_pinyin }}"
             echo "add_pinyin=${ADD_PINYIN:-true}" >> $GITHUB_OUTPUT
@@ -140,7 +138,6 @@ jobs:
             echo "add_translation=${ADD_TRANSLATION:-true}" >> $GITHUB_OUTPUT
             WORD_SPACING="${{ github.event.client_payload.word_spacing }}"
             echo "word_spacing=${WORD_SPACING:-true}" >> $GITHUB_OUTPUT
-            echo "kindle_format=false" >> $GITHUB_OUTPUT
 
             SIMPLIFY_HSK4="${{ github.event.client_payload.simplify_hsk4 }}"
             echo "simplify_hsk4=${SIMPLIFY_HSK4:-false}" >> $GITHUB_OUTPUT
@@ -154,6 +151,7 @@ jobs:
             echo "epub_filename=" >> $GITHUB_OUTPUT
             echo "artifact_name=" >> $GITHUB_OUTPUT
             echo "generate_anki=false" >> $GITHUB_OUTPUT
+            echo "generate_audio=false" >> $GITHUB_OUTPUT
 
             # Load from config.json if present, otherwise use defaults
             if [ -f "./input-epubs/config.json" ]; then
@@ -163,27 +161,17 @@ jobs:
               echo "add_pinyin=$(jq -r '.add_pinyin // true' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
               echo "add_translation=$(jq -r '.add_translation // true' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
               echo "word_spacing=$(jq -r '.word_spacing // true' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
-              echo "kindle_format=$(jq -r '.kindle_format // false' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
               echo "simplify_hsk4=$(jq -r '.simplify_hsk4 // false' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
               echo "use_claude=$(jq -r '.use_claude // false' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
               echo "use_opus=$(jq -r '.use_opus // false' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
-
-              KINDLE_OUTPUT=$(jq -r '.kindle_output // false' ./input-epubs/config.json)
-              if [ "$KINDLE_OUTPUT" == "true" ]; then
-                echo "output_format=kindle" >> $GITHUB_OUTPUT
-              else
-                echo "output_format=epub" >> $GITHUB_OUTPUT
-              fi
 
               GENERATE_ANKI=$(jq -r '.generate_anki // false' ./input-epubs/config.json)
               echo "generate_anki=${GENERATE_ANKI}" >> $GITHUB_OUTPUT
             else
               echo "translate_to=fr" >> $GITHUB_OUTPUT
-              echo "output_format=epub" >> $GITHUB_OUTPUT
               echo "add_pinyin=true" >> $GITHUB_OUTPUT
               echo "add_translation=true" >> $GITHUB_OUTPUT
               echo "word_spacing=true" >> $GITHUB_OUTPUT
-              echo "kindle_format=false" >> $GITHUB_OUTPUT
               echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
               echo "use_claude=false" >> $GITHUB_OUTPUT
               echo "use_opus=false" >> $GITHUB_OUTPUT
@@ -200,12 +188,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install Calibre (if Kindle output)
-        if: steps.params.outputs.output_format == 'kindle'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y calibre
-
       - name: Download input artifact
         if: steps.params.outputs.trigger_type != 'push' && steps.params.outputs.artifact_name != ''
         uses: actions/download-artifact@v4
@@ -217,7 +199,7 @@ jobs:
       - name: Prepare input files
         id: prepare
         run: |
-          mkdir -p ./input ./output
+          mkdir -p ./input
 
           if [ "${{ steps.params.outputs.trigger_type }}" == "push" ]; then
             # Find changed or all EPUB files
@@ -257,20 +239,51 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Convert EPUB(s)
+      - name: Upload input files
         if: steps.prepare.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: input-epubs-${{ github.run_id }}
+          path: ./input/*.epub
+          retention-days: 1
+
+  convert:
+    name: Convert EPUB
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download input files
+        uses: actions/download-artifact@v4
+        with:
+          name: input-epubs-${{ github.run_id }}
+          path: ./input
+
+      - name: Convert EPUB(s)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          TRANSLATE_TO="${{ steps.params.outputs.translate_to }}"
-          ADD_PINYIN="${{ steps.params.outputs.add_pinyin }}"
-          ADD_TRANSLATION="${{ steps.params.outputs.add_translation }}"
-          WORD_SPACING="${{ steps.params.outputs.word_spacing }}"
-          KINDLE_FORMAT="${{ steps.params.outputs.kindle_format }}"
-          SIMPLIFY_HSK4="${{ steps.params.outputs.simplify_hsk4 }}"
-          USE_CLAUDE="${{ steps.params.outputs.use_claude }}"
-          USE_OPUS="${{ steps.params.outputs.use_opus }}"
-          OUTPUT_FORMAT="${{ steps.params.outputs.output_format }}"
+          mkdir -p ./output
+          TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
+          ADD_PINYIN="${{ needs.prepare.outputs.add_pinyin }}"
+          ADD_TRANSLATION="${{ needs.prepare.outputs.add_translation }}"
+          WORD_SPACING="${{ needs.prepare.outputs.word_spacing }}"
+          SIMPLIFY_HSK4="${{ needs.prepare.outputs.simplify_hsk4 }}"
+          USE_CLAUDE="${{ needs.prepare.outputs.use_claude }}"
+          USE_OPUS="${{ needs.prepare.outputs.use_opus }}"
 
           for INPUT_FILE in ./input/*.epub; do
             [ -f "$INPUT_FILE" ] || continue
@@ -288,11 +301,9 @@ jobs:
             [ "$ADD_PINYIN" != "true" ] && [ "$ADD_TRANSLATION" == "true" ] && CMD="$CMD --translation-only"
             [ "$ADD_PINYIN" == "true" ] && [ "$ADD_TRANSLATION" != "true" ] && CMD="$CMD --pinyin-only"
             [ "$WORD_SPACING" == "true" ] && CMD="$CMD --word-spacing"
-            [ "$KINDLE_FORMAT" == "true" ] && CMD="$CMD --kindle-format"
             [ "$SIMPLIFY_HSK4" == "true" ] && CMD="$CMD --simplify-hsk4"
             [ "$USE_CLAUDE" == "true" ] && CMD="$CMD --use-claude"
             [ "$USE_OPUS" == "true" ] && CMD="$CMD --use-opus"
-            [ "$OUTPUT_FORMAT" == "kindle" ] && CMD="$CMD --kindle --kindle-profile kindle_pw3"
 
             echo "Running: $CMD"
             eval $CMD
@@ -302,14 +313,71 @@ jobs:
           echo "Output files:"
           ls -la ./output/
 
+      - name: Upload EPUB artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-epub-${{ github.run_id }}
+          path: ./output/*.epub
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Summary
+        run: |
+          echo "## Conversion Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Translation | ${{ needs.prepare.outputs.translate_to }} |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.prepare.outputs.simplify_hsk4 }}" == "true" ]; then
+            echo "| Quality | simplified (Claude + HSK 4) |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.prepare.outputs.use_claude }}" == "true" ]; then
+            echo "| Quality | premium (Claude Sonnet) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Quality | standard (Google Translate) |" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "| Anki deck | ${{ needs.prepare.outputs.generate_anki }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Audiobook | ${{ needs.prepare.outputs.generate_audio }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Output Files" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la ./output/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download from the Artifacts section below." >> $GITHUB_STEP_SUMMARY
+
+  anki:
+    name: Generate Anki Deck
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.generate_anki == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download input files
+        uses: actions/download-artifact@v4
+        with:
+          name: input-epubs-${{ github.run_id }}
+          path: ./input
+
       - name: Generate Anki decks
-        if: steps.prepare.outputs.skip != 'true' && steps.params.outputs.generate_anki == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          TRANSLATE_TO="${{ steps.params.outputs.translate_to }}"
-          USE_CLAUDE="${{ steps.params.outputs.use_claude }}"
-          USE_OPUS="${{ steps.params.outputs.use_opus }}"
+          mkdir -p ./output
+          TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
+          USE_CLAUDE="${{ needs.prepare.outputs.use_claude }}"
+          USE_OPUS="${{ needs.prepare.outputs.use_opus }}"
 
           for INPUT_FILE in ./input/*.epub; do
             [ -f "$INPUT_FILE" ] || continue
@@ -326,61 +394,74 @@ jobs:
             eval $CMD
           done
 
-      - name: Upload EPUB artifacts
-        if: steps.prepare.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: converted-epub-${{ github.run_id }}
-          path: ./output/*.epub
-          retention-days: 30
-          if-no-files-found: ignore
-
-      - name: Upload AZW3 artifacts
-        if: steps.prepare.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: converted-azw3-${{ github.run_id }}
-          path: ./output/*.azw3
-          retention-days: 30
-          if-no-files-found: ignore
-
       - name: Upload Anki artifacts
-        if: steps.prepare.outputs.skip != 'true' && steps.params.outputs.generate_anki == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: anki-deck-${{ github.run_id }}
           path: ./output/*.apkg
           retention-days: 30
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
-      - name: Summary
-        if: steps.prepare.outputs.skip != 'true'
+  audio:
+    name: Generate Audiobook
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.generate_audio == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download input files
+        uses: actions/download-artifact@v4
+        with:
+          name: input-epubs-${{ github.run_id }}
+          path: ./input
+
+      - name: Generate audiobook
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          echo "## Conversion Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Translation | ${{ steps.params.outputs.translate_to }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Output | ${{ steps.params.outputs.output_format }} |" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.params.outputs.simplify_hsk4 }}" == "true" ]; then
-            echo "| Quality | simplified (Claude + HSK 4) |" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ steps.params.outputs.use_claude }}" == "true" ]; then
-            echo "| Quality | premium (Claude Sonnet) |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| Quality | standard (Google Translate) |" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "| Anki deck | ${{ steps.params.outputs.generate_anki }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Output Files" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la ./output/ >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download from the Artifacts section below." >> $GITHUB_STEP_SUMMARY
+          mkdir -p ./output
+          TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
+          USE_CLAUDE="${{ needs.prepare.outputs.use_claude }}"
+          USE_OPUS="${{ needs.prepare.outputs.use_opus }}"
+
+          for INPUT_FILE in ./input/*.epub; do
+            [ -f "$INPUT_FILE" ] || continue
+
+            BASENAME=$(basename "$INPUT_FILE" .epub)
+            AUDIO_FILE="./output/${BASENAME}_audiobook.zip"
+
+            echo "Generating audiobook: $AUDIO_FILE"
+
+            CMD="python convert.py \"$INPUT_FILE\" -o \"$AUDIO_FILE\" --audio --target \"$TRANSLATE_TO\""
+            [ "$USE_CLAUDE" == "true" ] && CMD="$CMD --use-claude"
+            [ "$USE_OPUS" == "true" ] && CMD="$CMD --use-opus"
+
+            eval $CMD
+          done
+
+      - name: Upload audiobook artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiobook-${{ github.run_id }}
+          path: ./output/*.zip
+          retention-days: 30
+          if-no-files-found: warn
 
   notify:
     name: Send Notification
-    needs: convert
+    needs: [convert, anki, audio]
     if: |
       always() &&
       github.event_name == 'repository_dispatch' &&

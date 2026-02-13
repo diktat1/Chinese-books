@@ -50,6 +50,8 @@ Examples:
   python convert.py book.epub --anki --target fr           # Anki deck with French translations
   python convert.py book.epub --anki --no-audio            # Anki deck without TTS audio
   python convert.py book.epub --anki --max-sentences 100   # Limit to first 100 sentences
+  python convert.py book.epub --audio --target fr          # Bilingual audiobook (French + Chinese)
+  python convert.py book.epub --audio --no-bilingual       # Chinese-only audiobook
         ''',
     )
 
@@ -145,6 +147,19 @@ Examples:
         help='Maximum number of sentences for Anki deck (0 = all)',
     )
 
+    # Audiobook generation
+    parser.add_argument(
+        '--audio',
+        action='store_true',
+        help='Generate audiobook (ZIP of chapter MP3s) using edge-tts. '
+             'Free neural voices, no API key required.',
+    )
+    parser.add_argument(
+        '--no-bilingual',
+        action='store_true',
+        help='Chinese-only audio (skip target language narration)',
+    )
+
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
@@ -217,6 +232,40 @@ Examples:
             max_sentences=args.max_sentences,
         )
         print(f'\nAnki deck written to: {anki_output}')
+        return
+
+    # Audiobook mode - separate flow
+    if args.audio:
+        from graded_reader.audio_generator import generate_audiobook
+
+        if args.output:
+            audio_output = Path(args.output)
+            if audio_output.suffix.lower() != '.zip':
+                audio_output = audio_output.with_suffix('.zip')
+        else:
+            audio_output = input_path.with_stem(input_path.stem + '_audio').with_suffix('.zip')
+
+        bilingual = not args.no_bilingual
+
+        print(f'Input:  {input_path}')
+        print(f'Output: {audio_output}')
+        print(f'Mode:   Audiobook (edge-tts)')
+        if bilingual:
+            print(f'Audio:  Bilingual ({args.target} + {args.source})')
+        else:
+            print(f'Audio:  Chinese only ({args.source})')
+        print()
+
+        generate_audiobook(
+            epub_path=str(input_path),
+            output_path=str(audio_output),
+            translation_target=args.target,
+            translation_source=args.source,
+            bilingual=bilingual,
+            use_claude=args.use_claude,
+            use_opus=args.use_opus,
+        )
+        print(f'\nAudiobook written to: {audio_output}')
         return
 
     # Determine output paths
