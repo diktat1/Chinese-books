@@ -109,6 +109,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 env:
   PYTHON_VERSION: '3.11'
 
@@ -546,6 +549,35 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+      - name: Commit output files to repository
+        if: steps.prepare_input.outputs.skip_conversion != 'true'
+        run: |
+          # Configure git for the GitHub Actions bot
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create output-epubs directory and copy converted files
+          mkdir -p output-epubs
+          cp ./output/*.epub output-epubs/ 2>/dev/null || true
+          cp ./output/*.azw3 output-epubs/ 2>/dev/null || true
+
+          # Check if there are files to commit
+          if ls output-epubs/*.epub output-epubs/*.azw3 2>/dev/null | head -1 > /dev/null 2>&1; then
+            git add output-epubs/
+
+            # Only commit if there are actual changes
+            if git diff --cached --quiet; then
+              echo "No new output files to commit"
+            else
+              TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+              git commit -m "Add converted graded reader output ($TIMESTAMP)"
+              git push origin HEAD
+              echo "Output files committed to output-epubs/ folder"
+            fi
+          else
+            echo "No output files found to commit"
+          fi
+
       - name: Summary
         if: steps.prepare_input.outputs.skip_conversion != 'true'
         run: |
@@ -570,7 +602,9 @@ jobs:
           ls -la ./output/ >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download artifacts from the Actions run page." >> $GITHUB_STEP_SUMMARY
+          echo "Output files have been committed to the **output-epubs/** folder in the repository." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts are also available for download from this Actions run page." >> $GITHUB_STEP_SUMMARY
 
   # Optional: Send notification to callback URL (for repository_dispatch)
   notify:
