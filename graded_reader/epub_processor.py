@@ -47,53 +47,105 @@ rp {
     display: none;
 }
 
-/* Extra line height to accommodate pinyin above characters */
+/* Base styling */
 body {
-    line-height: 2.2;
+    line-height: 2.0;
     font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", serif;
 }
 
 p {
-    line-height: 2.2;
+    line-height: 2.0;
     margin-bottom: 1em;
     text-align: justify;
 }
 
 /* Headings */
 h1, h2, h3, h4, h5, h6 {
-    line-height: 2.2;
+    line-height: 2.0;
     margin-top: 1.5em;
     margin-bottom: 0.5em;
 }
 
-/* English translation styling */
+/* Lists */
+ul, ol {
+    margin-bottom: 1em;
+    padding-left: 1.5em;
+}
+
+li {
+    line-height: 2.0;
+    margin-bottom: 0.3em;
+}
+
+/* Blockquotes */
+blockquote {
+    line-height: 2.0;
+    margin: 0.8em 0;
+    padding-left: 1em;
+    border-left: 3px solid #ddd;
+}
+
+/* Translation styling - consistent for all element types */
 .translation {
-    font-size: 0.8em;
+    font-size: 0.75em;
     color: #666;
     font-style: italic;
-    margin-top: 0.3em;
-    margin-bottom: 1.2em;
-    padding: 0.5em 0.8em;
+    line-height: 1.4;
+    margin-top: 0.2em;
+    margin-bottom: 1em;
+    padding: 0.4em 0.8em;
     background-color: #f8f8f8;
     border-left: 3px solid #ccc;
     border-radius: 0 4px 4px 0;
     font-family: Georgia, "Times New Roman", serif;
 }
 
+/* Inline translation for list items and blockquotes */
+.translation-inline {
+    display: block;
+    font-size: 0.75em;
+    color: #666;
+    font-style: italic;
+    line-height: 1.4;
+    margin-top: 0.2em;
+    padding: 0.2em 0;
+    font-family: Georgia, "Times New Roman", serif;
+}
+
 /* Kindle-optimized paragraph format styling */
 .chinese-text {
-    font-size: 1.1em;
+    font-size: 1.3em;
     line-height: 1.8;
-    margin-bottom: 0.3em;
+    margin-bottom: 0.2em;
     letter-spacing: 0.05em;
 }
 
 .pinyin-text {
     font-size: 0.85em;
     color: #555;
-    line-height: 1.6;
-    margin-bottom: 0.5em;
+    line-height: 1.3;
+    margin-bottom: 0.3em;
     font-family: Georgia, "Times New Roman", serif;
+}
+
+/* Heading sizes in kindle format */
+h1.chinese-text { font-size: 1.6em; }
+h2.chinese-text { font-size: 1.5em; }
+h3.chinese-text { font-size: 1.4em; }
+
+/* Pinyin/translation for list items: keep as inline blocks */
+li .pinyin-inline {
+    display: block;
+    font-size: 0.85em;
+    color: #555;
+    line-height: 1.3;
+    margin-top: 0.1em;
+    font-family: Georgia, "Times New Roman", serif;
+}
+
+/* Word-level spans for Kindle dictionary lookup */
+.cw {
+    display: inline;
 }
 
 /* Dark mode support for e-readers that support it */
@@ -101,12 +153,12 @@ h1, h2, h3, h4, h5, h6 {
     rt {
         color: #aaa;
     }
-    .translation {
+    .translation, .translation-inline {
         background-color: #2a2a2a;
         color: #bbb;
         border-left-color: #555;
     }
-    .pinyin-text {
+    .pinyin-text, li .pinyin-inline {
         color: #aaa;
     }
 }
@@ -191,6 +243,10 @@ def process_epub(
     # Fix TOC entries that may have None uid (ebooklib read/write roundtrip issue)
     _fix_toc_uids(book.toc)
 
+    # Deduplicate items (ebooklib can create duplicates during read/write roundtrip,
+    # which causes images and other resources to appear multiple times)
+    _deduplicate_items(book)
+
     # Ensure all items have proper IDs to be included in the manifest
     for item in book.get_items():
         if item.get_id() is None:
@@ -218,6 +274,33 @@ def _fix_toc_uids(toc, prefix='toc') -> None:
             _fix_toc_uids(children, prefix=f'{prefix}_{i}')
         elif hasattr(item, 'uid') and item.uid is None:
             item.uid = f'{prefix}_{i}'
+
+
+def _deduplicate_items(book: epub.EpubBook) -> None:
+    """
+    Remove duplicate items from the EPUB book.
+
+    ebooklib can create duplicate entries during read/write roundtrip,
+    causing images and other resources to appear multiple times in the
+    output. This deduplicates by file name, keeping the first occurrence.
+    """
+    seen_names = set()
+    items_to_remove = []
+
+    for item in list(book.get_items()):
+        name = item.get_name()
+        if name in seen_names:
+            items_to_remove.append(item)
+            logger.debug(f'Removing duplicate item: {name}')
+        else:
+            seen_names.add(name)
+
+    for item in items_to_remove:
+        # ebooklib stores items internally; remove from the items list
+        try:
+            book.items.remove(item)
+        except (ValueError, AttributeError):
+            pass
 
 
 def _ensure_nav_document(book: epub.EpubBook) -> None:
@@ -252,6 +335,46 @@ def _ensure_nav_document(book: epub.EpubBook) -> None:
 
     # Insert nav at the beginning with linear='no' to hide it from reading order
     book.spine = [('nav', 'no')] + current_spine
+
+
+def _deduplicate_html_images(soup: BeautifulSoup) -> None:
+    """
+    Remove duplicate image references within a single HTML document.
+
+    Some EPUBs have the same image `src` appearing multiple times in a chapter.
+    This removes all but the first occurrence of each unique image source.
+    """
+    seen_srcs = set()
+    for img in soup.find_all('img'):
+        src = img.get('src', '')
+        if not src:
+            continue
+        if src in seen_srcs:
+            # Remove the duplicate image (and its parent if it's an otherwise-empty wrapper)
+            parent = img.parent
+            img.decompose()
+            if parent and parent.name in ('p', 'div', 'span') and not parent.get_text(strip=True) and not parent.find(['img', 'svg']):
+                parent.decompose()
+            logger.debug(f'Removed duplicate image: {src}')
+        else:
+            seen_srcs.add(src)
+
+    # Also handle SVG images
+    for svg in soup.find_all('image'):
+        href = svg.get('xlink:href', svg.get('href', ''))
+        if not href:
+            continue
+        if href in seen_srcs:
+            parent = svg.parent
+            svg.decompose()
+            if parent and parent.name == 'svg' and not parent.find_all():
+                wrapper = parent.parent
+                parent.decompose()
+                if wrapper and wrapper.name in ('p', 'div') and not wrapper.get_text(strip=True) and not wrapper.find(['img', 'svg']):
+                    wrapper.decompose()
+            logger.debug(f'Removed duplicate SVG image: {href}')
+        else:
+            seen_srcs.add(href)
 
 
 def _process_html_content(
@@ -289,6 +412,10 @@ def _process_html_content(
         )
         head.append(link_tag)
 
+    # Deduplicate images within this HTML document
+    # (some EPUBs have the same image referenced multiple times)
+    _deduplicate_html_images(soup)
+
     # Find all paragraph-level elements that contain Chinese text
     block_tags = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'caption', 'blockquote'])
 
@@ -322,22 +449,14 @@ def _process_html_content(
             if add_pinyin:
                 _annotate_block(block, soup, word_spacing=word_spacing)
 
-            if add_translation and block.name == 'p':
-                # Translate the original plain text (before pinyin was added)
-                if use_claude_translator:
-                    translation = translate_text_claude(
-                        plain_text, source=translation_source, target=translation_target,
-                        use_opus=use_opus
-                    )
-                else:
-                    translation = translate_text(
-                        plain_text, source=translation_source, target=translation_target
-                    )
-                if translation and not translation.startswith('[Translation failed') and not translation.startswith('[Translation'):
-                    trans_p = soup.new_tag('p')
-                    trans_p['class'] = 'translation'
-                    trans_p.string = translation
-                    block.insert_after(trans_p)
+            if add_translation:
+                _add_translation_to_block(
+                    block, soup, plain_text,
+                    translation_source=translation_source,
+                    translation_target=translation_target,
+                    use_claude_translator=use_claude_translator,
+                    use_opus=use_opus,
+                )
 
     # Return as string, preserving the XML declaration if present
     result = str(soup)
@@ -377,6 +496,66 @@ def _annotate_block(block: Tag, soup: BeautifulSoup, word_spacing: bool = False)
         text_node.replace_with(new_content)
 
 
+def _get_translation(
+    plain_text: str,
+    translation_source: str,
+    translation_target: str,
+    use_claude_translator: bool,
+    use_opus: bool,
+) -> str | None:
+    """Get translation for text, returning None on failure."""
+    if use_claude_translator:
+        translation = translate_text_claude(
+            plain_text, source=translation_source, target=translation_target,
+            use_opus=use_opus
+        )
+    else:
+        translation = translate_text(
+            plain_text, source=translation_source, target=translation_target
+        )
+    if translation and not translation.startswith('[Translation failed') and not translation.startswith('[Translation'):
+        return translation
+    return None
+
+
+def _add_translation_to_block(
+    block: Tag,
+    soup: BeautifulSoup,
+    plain_text: str,
+    translation_source: str = 'zh-CN',
+    translation_target: str = 'en',
+    use_claude_translator: bool = False,
+    use_opus: bool = False,
+) -> None:
+    """
+    Add translation to any block element type.
+
+    For <p>, <h*>, <blockquote>: inserts a translation <div> after the block.
+    For <li>: appends an inline translation span inside the list item
+              (inserting a <p> after an <li> would break HTML structure).
+    For <td>, <th>: appends inline translation inside the cell.
+    """
+    translation = _get_translation(
+        plain_text, translation_source, translation_target,
+        use_claude_translator, use_opus,
+    )
+    if not translation:
+        return
+
+    if block.name in ('li', 'td', 'th'):
+        # For list items and table cells, append translation inline
+        trans_span = soup.new_tag('span')
+        trans_span['class'] = 'translation-inline'
+        trans_span.string = translation
+        block.append(trans_span)
+    else:
+        # For p, h*, blockquote, caption: insert after block
+        trans_div = soup.new_tag('div')
+        trans_div['class'] = 'translation'
+        trans_div.string = translation
+        block.insert_after(trans_div)
+
+
 def _process_block_kindle_format(
     block: Tag,
     soup: BeautifulSoup,
@@ -391,56 +570,71 @@ def _process_block_kindle_format(
     """
     Process a block element using Kindle-optimized paragraph format.
 
-    Instead of ruby annotations, outputs:
-    1. Chinese paragraph with word spacing
-    2. Pinyin paragraph with word spacing
-    3. English translation paragraph (if enabled)
+    For <p>, <h*>, <blockquote>, <caption>:
+        Inserts pinyin and translation as sibling elements after the block.
 
-    This format works reliably on Kindle devices which have poor ruby support.
+    For <li>, <td>, <th>:
+        Appends pinyin and translation inline inside the element
+        (inserting siblings would break list/table HTML structure).
+
+    Uses zero-width spaces for word boundaries so Kindle can identify
+    words for dictionary lookup.
     """
-    # Elements to insert after the block (in reverse order for insert_after)
-    elements_to_insert = []
-
-    # Add pinyin paragraph first (will appear right after Chinese)
-    if add_pinyin:
-        pinyin_text = text_to_pinyin(plain_text)
-        pinyin_p = soup.new_tag('p')
-        pinyin_p['class'] = 'pinyin-text'
-        pinyin_p.string = pinyin_text
-        elements_to_insert.append(pinyin_p)
-
-    # Add translation paragraph (will appear after pinyin)
-    if add_translation and block.name == 'p':
-        if use_claude_translator:
-            translation = translate_text_claude(
-                plain_text, source=translation_source, target=translation_target,
-                use_opus=use_opus
-            )
-        else:
-            translation = translate_text(
-                plain_text, source=translation_source, target=translation_target
-            )
-        if translation and not translation.startswith('[Translation failed') and not translation.startswith('[Translation'):
-            trans_p = soup.new_tag('p')
-            trans_p['class'] = 'translation'
-            trans_p.string = translation
-            elements_to_insert.append(trans_p)
-
-    # Update the original block: replace content with word-spaced Chinese
     spaced_chinese = text_to_spaced_chinese(plain_text)
+    pinyin_text = text_to_pinyin(plain_text) if add_pinyin else None
 
-    # Store parent reference before clearing (clear() can sometimes orphan elements)
-    parent = block.parent
+    translation = None
+    if add_translation:
+        translation = _get_translation(
+            plain_text, translation_source, translation_target,
+            use_claude_translator, use_opus,
+        )
 
-    block.clear()
-    block['class'] = block.get('class', [])
-    if isinstance(block['class'], str):
-        block['class'] = [block['class']]
-    block['class'].append('chinese-text')
-    block.string = spaced_chinese
+    if block.name in ('li', 'td', 'th'):
+        # Inline mode: append pinyin and translation inside the element
+        block.clear()
+        block['class'] = block.get('class', [])
+        if isinstance(block['class'], str):
+            block['class'] = [block['class']]
+        block['class'].append('chinese-text')
+        block.append(NavigableString(spaced_chinese))
 
-    # Insert elements after the block (in reverse order)
-    # Only if block still has a parent (some nested structures can cause issues)
-    if parent is not None and block.parent is not None:
-        for elem in reversed(elements_to_insert):
-            block.insert_after(elem)
+        if pinyin_text:
+            pinyin_span = soup.new_tag('span')
+            pinyin_span['class'] = 'pinyin-inline'
+            pinyin_span.string = pinyin_text
+            block.append(pinyin_span)
+
+        if translation:
+            trans_span = soup.new_tag('span')
+            trans_span['class'] = 'translation-inline'
+            trans_span.string = translation
+            block.append(trans_span)
+    else:
+        # Sibling mode: insert pinyin and translation after block
+        elements_to_insert = []
+
+        if pinyin_text:
+            pinyin_p = soup.new_tag('p')
+            pinyin_p['class'] = 'pinyin-text'
+            pinyin_p.string = pinyin_text
+            elements_to_insert.append(pinyin_p)
+
+        if translation:
+            trans_div = soup.new_tag('div')
+            trans_div['class'] = 'translation'
+            trans_div.string = translation
+            elements_to_insert.append(trans_div)
+
+        # Update the original block with word-spaced Chinese
+        parent = block.parent
+        block.clear()
+        block['class'] = block.get('class', [])
+        if isinstance(block['class'], str):
+            block['class'] = [block['class']]
+        block['class'].append('chinese-text')
+        block.string = spaced_chinese
+
+        if parent is not None and block.parent is not None:
+            for elem in reversed(elements_to_insert):
+                block.insert_after(elem)
