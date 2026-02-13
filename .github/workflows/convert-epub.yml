@@ -32,6 +32,14 @@ on:
           - epub
           - kindle
         default: 'epub'
+      quality:
+        description: 'Quality level'
+        type: choice
+        options:
+          - standard (Google Translate)
+          - premium (Claude Sonnet)
+          - simplified (Claude + HSK 4)
+        default: 'standard (Google Translate)'
       generate_anki:
         description: 'Also generate Anki flashcard deck'
         type: boolean
@@ -90,9 +98,26 @@ jobs:
             echo "add_translation=true" >> $GITHUB_OUTPUT
             echo "word_spacing=true" >> $GITHUB_OUTPUT
             echo "kindle_format=false" >> $GITHUB_OUTPUT
-            echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
-            echo "use_claude=false" >> $GITHUB_OUTPUT
-            echo "use_opus=false" >> $GITHUB_OUTPUT
+
+            # Map quality choice to internal flags
+            QUALITY="${{ inputs.quality }}"
+            case "$QUALITY" in
+              "premium (Claude Sonnet)")
+                echo "use_claude=true" >> $GITHUB_OUTPUT
+                echo "use_opus=false" >> $GITHUB_OUTPUT
+                echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
+                ;;
+              "simplified (Claude + HSK 4)")
+                echo "use_claude=true" >> $GITHUB_OUTPUT
+                echo "use_opus=false" >> $GITHUB_OUTPUT
+                echo "simplify_hsk4=true" >> $GITHUB_OUTPUT
+                ;;
+              *)
+                echo "use_claude=false" >> $GITHUB_OUTPUT
+                echo "use_opus=false" >> $GITHUB_OUTPUT
+                echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
+                ;;
+            esac
 
           elif [ "${{ github.event_name }}" == "repository_dispatch" ]; then
             echo "trigger_type=repository_dispatch" >> $GITHUB_OUTPUT
@@ -337,6 +362,13 @@ jobs:
           echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Translation | ${{ steps.params.outputs.translate_to }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Output | ${{ steps.params.outputs.output_format }} |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.params.outputs.simplify_hsk4 }}" == "true" ]; then
+            echo "| Quality | simplified (Claude + HSK 4) |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.params.outputs.use_claude }}" == "true" ]; then
+            echo "| Quality | premium (Claude Sonnet) |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Quality | standard (Google Translate) |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| Anki deck | ${{ steps.params.outputs.generate_anki }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Output Files" >> $GITHUB_STEP_SUMMARY
