@@ -1,3 +1,12 @@
+---
+title: Chinese Graded Reader
+emoji: "\U0001F4DA"
+colorFrom: red
+colorTo: yellow
+sdk: docker
+app_port: 7860
+---
+
 # Chinese Graded Reader Converter
 
 Converts a Chinese EPUB ebook into a **graded reader** with:
