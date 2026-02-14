@@ -68,12 +68,29 @@ def _text_to_pinyin(text: str) -> str:
     return ' '.join(w for w in result if w.strip())
 
 
+def _get_spine_items(book):
+    """Return document items in spine (reading) order, not manifest order."""
+    items_by_id = {}
+    for item in book.get_items():
+        items_by_id[item.get_id()] = item
+        items_by_id[item.get_name()] = item
+
+    spine_items = []
+    for entry in book.spine:
+        item_id = entry[0] if isinstance(entry, tuple) else entry
+        item = items_by_id.get(item_id)
+        if item and item.get_type() == 9:
+            spine_items.append(item)
+
+    return spine_items or list(book.get_items_of_type(9))
+
+
 def _extract_sentences_from_epub(epub_path: str) -> list[str]:
-    """Extract all Chinese sentences from an EPUB file, in order."""
+    """Extract all Chinese sentences from an EPUB file, in reading order."""
     book = epub.read_epub(epub_path)
     sentences = []
 
-    for item in book.get_items_of_type(9):  # ITEM_DOCUMENT
+    for item in _get_spine_items(book):
         html = item.get_content().decode('utf-8', errors='replace')
         soup = BeautifulSoup(html, 'lxml')
 

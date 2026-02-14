@@ -428,8 +428,13 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng
+
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install kokoro soundfile "misaki[zh]" numpy || echo "Kokoro fallback not available"
 
       - name: Download input files
         uses: actions/download-artifact@v4
@@ -450,7 +455,7 @@ jobs:
             [ -f "$INPUT_FILE" ] || continue
 
             BASENAME=$(basename "$INPUT_FILE" .epub)
-            AUDIO_FILE="./output/${BASENAME}_audiobook.zip"
+            AUDIO_FILE="./output/${BASENAME}_audiobook.m4b"
 
             echo "Generating audiobook: $AUDIO_FILE"
 
@@ -465,7 +470,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: audiobook-${{ github.run_id }}
-          path: ./output/*.zip
+          path: ./output/*_audiobook.*
           retention-days: 30
           if-no-files-found: warn
 

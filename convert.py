@@ -240,23 +240,21 @@ Examples:
 
         if args.output:
             audio_output = Path(args.output)
-            if audio_output.suffix.lower() != '.zip':
-                audio_output = audio_output.with_suffix('.zip')
         else:
-            audio_output = input_path.with_stem(input_path.stem + '_audio').with_suffix('.zip')
+            audio_output = input_path.with_stem(input_path.stem + '_audiobook').with_suffix('.m4b')
 
         bilingual = not args.no_bilingual
 
         print(f'Input:  {input_path}')
-        print(f'Output: {audio_output}')
-        print(f'Mode:   Audiobook (edge-tts)')
+        print(f'Output: {audio_output} (format auto-detected)')
+        print(f'Mode:   Audiobook')
         if bilingual:
             print(f'Audio:  Bilingual ({args.target} + {args.source})')
         else:
             print(f'Audio:  Chinese only ({args.source})')
         print()
 
-        generate_audiobook(
+        result = generate_audiobook(
             epub_path=str(input_path),
             output_path=str(audio_output),
             translation_target=args.target,
@@ -265,7 +263,7 @@ Examples:
             use_claude=args.use_claude,
             use_opus=args.use_opus,
         )
-        print(f'\nAudiobook written to: {audio_output}')
+        print(f'\nAudiobook written to: {result}')
         return
 
     # Determine output paths
