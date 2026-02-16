@@ -25,7 +25,7 @@ from graded_reader.calibre import (
     convert_epub_to_azw3,
     CalibreNotFoundError,
 )
-from graded_reader.claude_simplifier import is_anthropic_available, get_api_key
+from graded_reader.claude_simplifier import is_openrouter_available, get_api_key
 
 
 def main():
@@ -114,13 +114,13 @@ Examples:
         '--simplify-hsk4',
         action='store_true',
         help='Simplify Chinese vocabulary to HSK 4 level using Claude AI. '
-             'Requires ANTHROPIC_API_KEY environment variable.',
+             'Requires OPENROUTER_API_KEY environment variable.',
     )
     parser.add_argument(
         '--use-claude',
         action='store_true',
         help='Use Claude AI for translation instead of Google Translate. '
-             'Provides higher quality translations. Requires ANTHROPIC_API_KEY.',
+             'Provides higher quality translations. Requires OPENROUTER_API_KEY.',
     )
     parser.add_argument(
         '--use-opus',
@@ -193,12 +193,12 @@ Examples:
 
     # Check Anthropic availability if Claude features are requested
     if args.simplify_hsk4 or args.use_claude:
-        if not is_anthropic_available():
-            print('Error: Anthropic SDK not installed. Install with: pip install anthropic', file=sys.stderr)
+        if not is_openrouter_available():
+            print('Error: OpenAI SDK not installed. Install with: pip install openai', file=sys.stderr)
             sys.exit(1)
         if not get_api_key():
-            print('Error: ANTHROPIC_API_KEY environment variable not set.', file=sys.stderr)
-            print('Get your API key from https://console.anthropic.com/', file=sys.stderr)
+            print('Error: OPENROUTER_API_KEY environment variable not set.', file=sys.stderr)
+            print('Get your API key from https://openrouter.ai/', file=sys.stderr)
             sys.exit(1)
 
     # Anki deck mode - separate flow

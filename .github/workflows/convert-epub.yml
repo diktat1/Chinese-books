@@ -188,13 +188,13 @@ jobs:
             fi
           fi
 
-      - name: Validate Claude API key (if needed)
+      - name: Validate OpenRouter API key (if needed)
         if: steps.params.outputs.simplify_hsk4 == 'true' || steps.params.outputs.use_claude == 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::error::ANTHROPIC_API_KEY secret required. Add it in Settings > Secrets > Actions."
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::OPENROUTER_API_KEY secret required. Add it in Settings > Secrets > Actions."
             exit 1
           fi
 
@@ -284,7 +284,7 @@ jobs:
 
       - name: Convert EPUB(s)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           mkdir -p ./output
           TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
@@ -382,7 +382,7 @@ jobs:
 
       - name: Generate Anki decks
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           mkdir -p ./output
           TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
@@ -444,7 +444,7 @@ jobs:
 
       - name: Generate audiobook
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           mkdir -p ./output
           TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"

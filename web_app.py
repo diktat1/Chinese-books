@@ -28,7 +28,7 @@ from graded_reader.calibre import (
     convert_epub_to_azw3,
     CalibreNotFoundError,
 )
-from graded_reader.claude_simplifier import is_anthropic_available, get_api_key
+from graded_reader.claude_simplifier import is_openrouter_available, get_api_key
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -382,7 +382,7 @@ def check_deps():
     return jsonify({
         'calibre': calibre,
         'calibre_version': get_calibre_version() if calibre else None,
-        'claude': is_anthropic_available() and bool(get_api_key()),
+        'claude': is_openrouter_available() and bool(get_api_key()),
         'ffmpeg': shutil.which('ffmpeg') is not None,
     })
 
@@ -396,7 +396,7 @@ def check_calibre():
 
 @app.route('/check-claude')
 def check_claude():
-    if not is_anthropic_available():
+    if not is_openrouter_available():
         return jsonify({'available': False, 'reason': 'no_sdk'})
     if not get_api_key():
         return jsonify({'available': False, 'reason': 'no_api_key'})
@@ -435,7 +435,7 @@ def convert():
     if kindle_output and not is_calibre_installed():
         return 'Calibre is not installed. Cannot convert to AZW3.', 400
 
-    if (simplify_hsk4 or use_claude) and (not is_anthropic_available() or not get_api_key()):
+    if (simplify_hsk4 or use_claude) and (not is_openrouter_available() or not get_api_key()):
         return 'Claude API not available. Select Standard quality.', 400
 
     orig_name = Path(file.filename).stem

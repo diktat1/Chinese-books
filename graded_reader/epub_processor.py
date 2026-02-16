@@ -20,7 +20,7 @@ from .chinese_processing import (
     text_to_pinyin,
 )
 from .translator import translate_text
-from .claude_simplifier import simplify_to_hsk4, is_anthropic_available as is_simplifier_available
+from .claude_simplifier import simplify_to_hsk4, is_openrouter_available as is_simplifier_available
 from .claude_translator import translate_text_claude
 
 logger = logging.getLogger(__name__)
