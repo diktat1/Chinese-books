@@ -25,7 +25,7 @@ from graded_reader.calibre import (
     convert_epub_to_azw3,
     CalibreNotFoundError,
 )
-from graded_reader.claude_simplifier import is_anthropic_available, get_api_key
+from graded_reader.claude_simplifier import is_openrouter_available, get_api_key
 
 
 def main():
@@ -114,13 +114,13 @@ Examples:
         '--simplify-hsk4',
         action='store_true',
         help='Simplify Chinese vocabulary to HSK 4 level using Claude AI. '
-             'Requires ANTHROPIC_API_KEY environment variable.',
+             'Requires OPENROUTER_API_KEY environment variable.',
     )
     parser.add_argument(
         '--use-claude',
         action='store_true',
         help='Use Claude AI for translation instead of Google Translate. '
-             'Provides higher quality translations. Requires ANTHROPIC_API_KEY.',
+             'Provides higher quality translations. Requires OPENROUTER_API_KEY.',
     )
     parser.add_argument(
         '--use-opus',
@@ -193,12 +193,12 @@ Examples:
 
     # Check Anthropic availability if Claude features are requested
     if args.simplify_hsk4 or args.use_claude:
-        if not is_anthropic_available():
-            print('Error: Anthropic SDK not installed. Install with: pip install anthropic', file=sys.stderr)
+        if not is_openrouter_available():
+            print('Error: OpenAI SDK not installed. Install with: pip install openai', file=sys.stderr)
             sys.exit(1)
         if not get_api_key():
-            print('Error: ANTHROPIC_API_KEY environment variable not set.', file=sys.stderr)
-            print('Get your API key from https://console.anthropic.com/', file=sys.stderr)
+            print('Error: OPENROUTER_API_KEY environment variable not set.', file=sys.stderr)
+            print('Get your API key from https://openrouter.ai/', file=sys.stderr)
             sys.exit(1)
 
     # Anki deck mode - separate flow
@@ -240,23 +240,21 @@ Examples:
 
         if args.output:
             audio_output = Path(args.output)
-            if audio_output.suffix.lower() != '.zip':
-                audio_output = audio_output.with_suffix('.zip')
         else:
-            audio_output = input_path.with_stem(input_path.stem + '_audio').with_suffix('.zip')
+            audio_output = input_path.with_stem(input_path.stem + '_audiobook').with_suffix('.m4b')
 
         bilingual = not args.no_bilingual
 
         print(f'Input:  {input_path}')
-        print(f'Output: {audio_output}')
-        print(f'Mode:   Audiobook (edge-tts)')
+        print(f'Output: {audio_output} (format auto-detected)')
+        print(f'Mode:   Audiobook')
         if bilingual:
             print(f'Audio:  Bilingual ({args.target} + {args.source})')
         else:
             print(f'Audio:  Chinese only ({args.source})')
         print()
 
-        generate_audiobook(
+        result = generate_audiobook(
             epub_path=str(input_path),
             output_path=str(audio_output),
             translation_target=args.target,
@@ -265,7 +263,7 @@ Examples:
             use_claude=args.use_claude,
             use_opus=args.use_opus,
         )
-        print(f'\nAudiobook written to: {audio_output}')
+        print(f'\nAudiobook written to: {result}')
         return
 
     # Determine output paths

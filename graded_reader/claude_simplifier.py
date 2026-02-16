@@ -1,8 +1,9 @@
 """
-HSK 4 Vocabulary Simplifier using Claude API.
+HSK 4 Vocabulary Simplifier using OpenRouter API.
 
-This module uses Claude to simplify Chinese text to HSK 4 vocabulary level,
-replacing advanced words with simpler equivalents that HSK 4 learners can understand.
+This module uses Claude (via OpenRouter) to simplify Chinese text to HSK 4
+vocabulary level, replacing advanced words with simpler equivalents that
+HSK 4 learners can understand.
 """
 
 import os
@@ -11,26 +12,39 @@ import logging
 from typing import Optional
 
 try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
+    from openai import OpenAI
+    import openai
+    OPENROUTER_AVAILABLE = True
 except ImportError:
-    ANTHROPIC_AVAILABLE = False
+    OPENROUTER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 # Default model for simplification (can be overridden)
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
-OPUS_MODEL = "claude-opus-4-0-20250514"
+DEFAULT_MODEL = "anthropic/claude-sonnet-4"
+OPUS_MODEL = "anthropic/claude-opus-4"
 
 
-def is_anthropic_available() -> bool:
-    """Check if the Anthropic SDK is installed."""
-    return ANTHROPIC_AVAILABLE
+def is_openrouter_available() -> bool:
+    """Check if the OpenAI SDK (for OpenRouter) is installed."""
+    return OPENROUTER_AVAILABLE
 
 
 def get_api_key() -> Optional[str]:
-    """Get Anthropic API key from environment variable."""
-    return os.environ.get('ANTHROPIC_API_KEY')
+    """Get OpenRouter API key from environment variable."""
+    return os.environ.get('OPENROUTER_API_KEY')
+
+
+def _create_client() -> 'OpenAI':
+    """Create an OpenRouter client."""
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ.get("OPENROUTER_API_KEY"),
+        default_headers={
+            "HTTP-Referer": "https://github.com/diktat1/Chinese-books",
+            "X-Title": "Chinese Graded Reader",
+        },
+    )
 
 
 def simplify_to_hsk4(
@@ -53,13 +67,13 @@ def simplify_to_hsk4(
         Simplified Chinese text at HSK 4 level.
         Returns original text with error note if simplification fails.
     """
-    if not ANTHROPIC_AVAILABLE:
-        logger.error("Anthropic SDK not installed. Install with: pip install anthropic")
-        return f"[Simplification unavailable - anthropic not installed] {text}"
+    if not OPENROUTER_AVAILABLE:
+        logger.error("OpenAI SDK not installed. Install with: pip install openai")
+        return f"[Simplification unavailable - openai not installed] {text}"
 
     api_key = get_api_key()
     if not api_key:
-        logger.error("ANTHROPIC_API_KEY environment variable not set")
+        logger.error("OPENROUTER_API_KEY environment variable not set")
         return f"[Simplification unavailable - API key not set] {text}"
 
     text = text.strip()
@@ -73,7 +87,7 @@ def simplify_to_hsk4(
 
 def _simplify_with_retry(text: str, model: str, max_retries: int) -> str:
     """Simplify text with exponential backoff retry."""
-    client = anthropic.Anthropic()
+    client = _create_client()
 
     system_prompt = """You are a Chinese language simplification expert. Your task is to simplify Chinese text to HSK 4 vocabulary level.
 
@@ -97,19 +111,22 @@ Remember: Output only the simplified Chinese text, nothing else."""
 
     for attempt in range(max_retries):
         try:
-            message = client.messages.create(
+            completion = client.chat.completions.create(
                 model=model,
                 max_tokens=len(text) * 3,  # Allow for expansion
                 messages=[
-                    {"role": "user", "content": user_prompt}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
                 ],
-                system=system_prompt,
             )
 
-            result = message.content[0].text.strip()
-            return result
+            content = completion.choices[0].message.content
+            if content is None:
+                logger.warning("Empty response from API")
+                return text
+            return content.strip()
 
-        except anthropic.RateLimitError as e:
+        except openai.RateLimitError as e:
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
                 logger.warning(
@@ -121,7 +138,7 @@ Remember: Output only the simplified Chinese text, nothing else."""
                 logger.error(f'Simplification rate limited after {max_retries} attempts: {e}')
                 return f'[Simplification rate limited] {text}'
 
-        except anthropic.APIError as e:
+        except openai.APIError as e:
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
                 logger.warning(
@@ -157,14 +174,14 @@ def analyze_vocabulary_level(
         - 'simplified_suggestions': Suggested HSK 4 replacements
         - 'difficulty_score': Estimated difficulty (1-10)
     """
-    if not ANTHROPIC_AVAILABLE:
-        return {'error': 'Anthropic SDK not installed'}
+    if not OPENROUTER_AVAILABLE:
+        return {'error': 'OpenAI SDK not installed'}
 
     api_key = get_api_key()
     if not api_key:
-        return {'error': 'ANTHROPIC_API_KEY not set'}
+        return {'error': 'OPENROUTER_API_KEY not set'}
 
-    client = anthropic.Anthropic()
+    client = _create_client()
     model = OPUS_MODEL if use_opus else DEFAULT_MODEL
 
     system_prompt = """You are a Chinese language analysis expert. Analyze the given text and identify vocabulary difficulty.
@@ -179,16 +196,20 @@ DIFFICULTY_SCORE: X/10
 Keep the format exact. If no advanced words found, write "ADVANCED_WORDS: None"."""
 
     try:
-        message = client.messages.create(
+        completion = client.chat.completions.create(
             model=model,
             max_tokens=2000,
             messages=[
-                {"role": "user", "content": f"Analyze this Chinese text:\n\n{text}"}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Analyze this Chinese text:\n\n{text}"},
             ],
-            system=system_prompt,
         )
 
-        response = message.content[0].text
+        content = completion.choices[0].message.content
+        if content is None:
+            return {'error': 'Empty response from API'}
+
+        response = content
 
         # Parse the response
         result = {

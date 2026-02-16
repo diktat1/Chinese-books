@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Simple Flask web app for drag-and-drop EPUB conversion.
+Web app for converting Chinese EPUBs into learning materials.
+
+Upload an EPUB and get back any combination of:
+  - Graded reader EPUB/AZW3 (pinyin + translation)
+  - Anki flashcard deck
+  - M4B audiobook with chapter markers
 
 Run with:
     python web_app.py
@@ -11,6 +16,7 @@ Then open http://localhost:5000 in your browser.
 import os
 import tempfile
 import logging
+import zipfile
 from pathlib import Path
 
 from flask import Flask, request, send_file, render_template_string, jsonify
@@ -22,7 +28,7 @@ from graded_reader.calibre import (
     convert_epub_to_azw3,
     CalibreNotFoundError,
 )
-from graded_reader.claude_simplifier import is_anthropic_available, get_api_key
+from graded_reader.claude_simplifier import is_openrouter_available, get_api_key
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -35,7 +41,7 @@ HTML_PAGE = '''
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Chinese Graded Reader Converter</title>
+    <title>Chinese Graded Reader</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -43,336 +49,319 @@ HTML_PAGE = '''
             background: #f5f5f5;
             color: #333;
             min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            padding: 20px;
         }
-        .container {
-            background: white;
+        .page {
+            max-width: 520px;
+            margin: 0 auto;
+        }
+        h1 { font-size: 1.4em; margin-bottom: 4px; }
+        .sub { color: #888; font-size: .9em; margin-bottom: 20px; }
+        .card {
+            background: #fff;
             border-radius: 12px;
-            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
-            padding: 40px;
-            max-width: 600px;
-            width: 90%;
+            box-shadow: 0 2px 12px rgba(0,0,0,.08);
+            padding: 24px;
+            margin-bottom: 16px;
         }
-        h1 {
-            font-size: 1.5em;
-            margin-bottom: 8px;
+        .section-title {
+            font-weight: 600; font-size: .92em; color: #555;
+            margin-bottom: 8px; text-transform: uppercase; letter-spacing: .5px;
         }
-        .subtitle {
-            color: #888;
-            margin-bottom: 30px;
-            font-size: 0.95em;
-        }
+        /* Drop zone */
         .drop-zone {
-            border: 2px dashed #ccc;
-            border-radius: 8px;
-            padding: 50px 20px;
-            text-align: center;
-            cursor: pointer;
-            transition: all 0.2s;
-            margin-bottom: 20px;
+            border: 2px dashed #ccc; border-radius: 8px;
+            padding: 40px 16px; text-align: center; cursor: pointer;
+            transition: all 0.2s; margin-bottom: 16px;
         }
-        .drop-zone:hover, .drop-zone.drag-over {
-            border-color: #e74c3c;
-            background: #fef5f5;
+        .drop-zone:hover, .drop-zone.active { border-color: #e74c3c; background: #fef5f5; }
+        .drop-zone .icon { font-size: 2.2em; margin-bottom: 6px; }
+        .drop-zone .name { font-weight: 600; color: #333; margin-top: 8px; word-break: break-all; }
+        .drop-zone input { display: none; }
+        /* Outputs */
+        .outputs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+        .output-btn {
+            flex: 1; min-width: 100px; padding: 14px 8px; border: 2px solid #e0e0e0;
+            border-radius: 10px; background: #fff; cursor: pointer; text-align: center;
+            transition: all .15s; position: relative;
         }
-        .drop-zone p {
-            font-size: 1.1em;
-            color: #666;
-        }
-        .drop-zone .icon {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        .drop-zone .filename {
-            margin-top: 10px;
-            font-weight: bold;
-            color: #333;
-        }
-        .options {
-            margin-bottom: 20px;
-        }
-        .options label {
-            display: block;
-            padding: 8px 0;
-            cursor: pointer;
-        }
-        .options input[type="checkbox"] {
-            margin-right: 8px;
-        }
-        button {
-            background: #e74c3c;
-            color: white;
-            border: none;
-            padding: 14px 28px;
-            border-radius: 8px;
-            font-size: 1em;
-            cursor: pointer;
-            width: 100%;
-            transition: background 0.2s;
-        }
-        button:hover { background: #c0392b; }
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-        .status {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 8px;
+        .output-btn:hover { border-color: #ccc; }
+        .output-btn.selected { border-color: #e74c3c; background: #fef5f5; }
+        .output-btn .out-icon { font-size: 1.6em; display: block; margin-bottom: 4px; }
+        .output-btn .out-label { font-size: .82em; font-weight: 600; }
+        .output-btn .out-desc { font-size: .72em; color: #999; margin-top: 2px; }
+        .output-btn .check {
+            position: absolute; top: 6px; right: 8px; font-size: .8em; color: #e74c3c;
             display: none;
         }
-        .status.processing {
-            display: block;
-            background: #fff3cd;
-            color: #856404;
+        .output-btn.selected .check { display: block; }
+        /* Options grid */
+        .opt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
+        .opt-grid label { font-size: .9em; padding: 4px 0; cursor: pointer; }
+        .opt-grid input { margin-right: 6px; }
+        select {
+            width: 100%; padding: 8px 10px; border: 1px solid #ddd;
+            border-radius: 6px; font-size: .95em; background: #fff;
         }
-        .status.done {
-            display: block;
-            background: #d4edda;
-            color: #155724;
+        hr { border: none; border-top: 1px solid #eee; margin: 14px 0; }
+        /* Button */
+        .convert-btn {
+            background: #e74c3c; color: #fff; border: none; padding: 16px;
+            border-radius: 10px; font-size: 1.05em; font-weight: 600;
+            cursor: pointer; width: 100%; transition: background .2s;
         }
-        .status.error {
-            display: block;
-            background: #f8d7da;
-            color: #721c24;
+        .convert-btn:hover { background: #c0392b; }
+        .convert-btn:disabled { background: #ccc; cursor: not-allowed; }
+        /* Status */
+        .status {
+            margin-top: 14px; padding: 14px; border-radius: 8px;
+            font-size: .9em; display: none;
         }
-        .note {
-            margin-top: 20px;
-            font-size: 0.85em;
-            color: #999;
-            line-height: 1.5;
+        .status.info { display: block; background: #fff3cd; color: #856404; }
+        .status.ok { display: block; background: #d4edda; color: #155724; }
+        .status.err { display: block; background: #f8d7da; color: #721c24; }
+        /* Dep badges */
+        .dep-badge {
+            display: inline-block; font-size: .78em; padding: 3px 8px;
+            border-radius: 4px; margin-right: 6px; margin-top: 6px;
         }
-        .kindle-status {
-            font-size: 0.85em;
-            padding: 8px 12px;
-            border-radius: 4px;
-            margin-top: 8px;
-            margin-bottom: 8px;
+        .dep-badge.ok { background: #d4edda; color: #155724; }
+        .dep-badge.miss { background: #f8d7da; color: #721c24; }
+        .dep-badge a { color: inherit; font-weight: 600; }
+        .small { font-size: .78em; color: #aaa; line-height: 1.5; margin-top: 10px; }
+        /* Progress bar */
+        .progress-bar {
+            height: 4px; background: #eee; border-radius: 2px;
+            margin-top: 8px; overflow: hidden; display: none;
         }
-        .kindle-status.available {
-            background: #d4edda;
-            color: #155724;
+        .progress-bar.active { display: block; }
+        .progress-bar .fill {
+            height: 100%; background: #e74c3c; border-radius: 2px;
+            animation: progress 2s ease-in-out infinite;
         }
-        .kindle-status.missing {
-            background: #f8d7da;
-            color: #721c24;
-        }
-        .kindle-status a {
-            color: inherit;
-            font-weight: bold;
-        }
-        .options input:disabled + span {
-            color: #999;
-        }
-        .claude-status {
-            font-size: 0.85em;
-            padding: 8px 12px;
-            border-radius: 4px;
-            margin-top: 8px;
-        }
-        .claude-status.available {
-            background: #d4edda;
-            color: #155724;
-        }
-        .claude-status.missing {
-            background: #f8d7da;
-            color: #721c24;
-        }
-        .claude-status a {
-            color: inherit;
-            font-weight: bold;
+        @keyframes progress {
+            0% { width: 0; } 50% { width: 80%; } 100% { width: 100%; }
         }
     </style>
 </head>
 <body>
-<div class="container">
-    <h1>Chinese Graded Reader Converter</h1>
-    <p class="subtitle">Upload a Chinese EPUB to add pinyin and English translations</p>
+<div class="page">
 
-    <form id="uploadForm" enctype="multipart/form-data">
-        <div class="drop-zone" id="dropZone">
-            <div class="icon">&#128214;</div>
-            <p>Drag &amp; drop an EPUB file here<br>or click to browse</p>
-            <input type="file" name="file" id="fileInput" accept=".epub" hidden>
-            <div class="filename" id="fileName"></div>
+<div class="card">
+    <h1>Chinese Graded Reader</h1>
+    <p class="sub">Turn any Chinese EPUB into a learning kit</p>
+
+    <div class="drop-zone" id="dropZone">
+        <div class="icon">&#128214;</div>
+        <p>Drop an EPUB here or tap to browse</p>
+        <div class="name" id="fileName"></div>
+        <input type="file" id="fileInput" accept=".epub">
+    </div>
+
+    <div class="section-title">What do you want?</div>
+    <div class="outputs" id="outputs">
+        <div class="output-btn selected" data-output="epub">
+            <span class="check">&#10003;</span>
+            <span class="out-icon">&#128216;</span>
+            <span class="out-label">Graded Reader</span>
+            <span class="out-desc">EPUB with pinyin</span>
         </div>
-
-        <div class="options">
-            <label><input type="checkbox" name="add_pinyin" checked> Add pinyin above characters</label>
-            <label><input type="checkbox" name="add_translation" checked> Add English translation after paragraphs</label>
-            <label><input type="checkbox" name="kindle_format" id="kindleFormat"> <span>Kindle-optimized format (paragraph-by-paragraph instead of ruby)</span></label>
-            <label><input type="checkbox" name="kindle_output" id="kindleOutput"> <span>Output as AZW3 for Kindle</span></label>
-            <div class="kindle-status" id="kindleStatus"></div>
-            <hr style="margin: 15px 0; border: none; border-top: 1px solid #eee;">
-            <label><input type="checkbox" name="simplify_hsk4" id="simplifyHsk4"> <span>Simplify to HSK 4 vocabulary (Claude AI)</span></label>
-            <label><input type="checkbox" name="use_claude" id="useClaude"> <span>Use Claude AI for translation (higher quality)</span></label>
-            <label><input type="checkbox" name="use_opus" id="useOpus"> <span>Use Claude Opus model (best quality, slower)</span></label>
-            <div class="claude-status" id="claudeStatus"></div>
+        <div class="output-btn" data-output="anki">
+            <span class="check">&#10003;</span>
+            <span class="out-icon">&#127183;</span>
+            <span class="out-label">Flashcards</span>
+            <span class="out-desc">Anki deck</span>
         </div>
+        <div class="output-btn" data-output="audio">
+            <span class="check">&#10003;</span>
+            <span class="out-icon">&#127911;</span>
+            <span class="out-label">Audiobook</span>
+            <span class="out-desc">M4B for iPhone</span>
+        </div>
+    </div>
+</div>
 
-        <button type="submit" id="convertBtn" disabled>Convert to Graded Reader</button>
-    </form>
+<div class="card" id="optionsCard">
+    <div class="section-title">Options</div>
+    <div class="opt-grid">
+        <div>
+            <label>Target language</label>
+            <select id="optTarget">
+                <option value="fr">French</option>
+                <option value="en" selected>English</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="de">German</option>
+                <option value="es">Spanish</option>
+                <option value="it">Italian</option>
+                <option value="pt">Portuguese</option>
+            </select>
+        </div>
+        <div>
+            <label>Quality</label>
+            <select id="optQuality">
+                <option value="standard">Standard (Google)</option>
+                <option value="claude">Premium (Claude)</option>
+                <option value="simplified">Simplified (HSK 4)</option>
+            </select>
+        </div>
+    </div>
+    <hr>
+    <div class="opt-grid" id="epubOptions">
+        <label><input type="checkbox" id="optPinyin" checked> Pinyin annotations</label>
+        <label><input type="checkbox" id="optTranslation" checked> Translation</label>
+        <label><input type="checkbox" id="optWordSpacing"> Word spacing</label>
+        <label><input type="checkbox" id="optKindleFormat"> Kindle format</label>
+        <label><input type="checkbox" id="optKindleOutput"> Output as AZW3</label>
+    </div>
+    <div class="opt-grid" id="audioOptions" style="display:none">
+        <label><input type="checkbox" id="optBilingual" checked> Bilingual narration</label>
+    </div>
+    <div id="deps"></div>
+</div>
 
+<div class="card">
+    <button class="convert-btn" id="convertBtn" disabled>Convert</button>
+    <div class="progress-bar" id="progressBar"><div class="fill"></div></div>
     <div class="status" id="status"></div>
-
-    <p class="note">
-        Pinyin-only conversion is fast (seconds). Adding translations takes longer
-        because each paragraph is sent to Google Translate.<br>
-        For Kindle: use "Kindle-optimized format" for paragraph-by-paragraph output
-        (Chinese, pinyin, English) which works better on Kindle devices.
-        Check "Output as AZW3" for direct Kindle format (requires Calibre).<br>
-        <strong>Claude AI features:</strong> HSK 4 simplification replaces advanced vocabulary
-        with simpler words. Claude translation provides higher quality than Google Translate.
-        Requires ANTHROPIC_API_KEY environment variable.
+    <p class="small">
+        Graded reader: seconds (pinyin only) to minutes (with translation).<br>
+        Anki: ~1 min per 100 sentences. Audiobook: ~2 min per chapter.<br>
+        Multiple outputs are bundled in a single ZIP download.
     </p>
 </div>
 
+</div>
+
 <script>
-const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('fileInput');
-const fileName = document.getElementById('fileName');
-const form = document.getElementById('uploadForm');
-const btn = document.getElementById('convertBtn');
-const status = document.getElementById('status');
-const kindleCheckbox = document.getElementById('kindleOutput');
-const kindleStatus = document.getElementById('kindleStatus');
+const $ = id => document.getElementById(id);
 
-// Check Calibre availability on page load
-async function checkCalibre() {
-    try {
-        const resp = await fetch('/check-calibre');
-        const data = await resp.json();
-        if (data.available) {
-            kindleStatus.className = 'kindle-status available';
-            kindleStatus.textContent = 'Calibre detected: ' + data.version;
-        } else {
-            kindleStatus.className = 'kindle-status missing';
-            kindleStatus.innerHTML = 'Calibre not installed. <a href="https://calibre-ebook.com/download" target="_blank">Install Calibre</a> for AZW3 support.';
-            kindleCheckbox.disabled = true;
-        }
-    } catch (e) {
-        kindleStatus.className = 'kindle-status missing';
-        kindleStatus.textContent = 'Could not check Calibre status';
-        kindleCheckbox.disabled = true;
-    }
+// --- Output selection ---
+const selected = new Set(['epub']);
+document.querySelectorAll('.output-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const out = btn.dataset.output;
+        if (selected.has(out)) selected.delete(out);
+        else selected.add(out);
+        btn.classList.toggle('selected');
+        updateUI();
+    });
+});
+
+function updateUI() {
+    $('epubOptions').style.display = selected.has('epub') ? '' : 'none';
+    $('audioOptions').style.display = selected.has('audio') ? '' : 'none';
+    const label = selected.size > 1 ? 'Convert & Download ZIP' :
+                  selected.has('epub') ? 'Convert to Graded Reader' :
+                  selected.has('anki') ? 'Generate Flashcards' :
+                  selected.has('audio') ? 'Generate Audiobook' : 'Select an output';
+    $('convertBtn').textContent = label;
 }
-checkCalibre();
 
-// Check Claude/Anthropic availability
-const claudeStatus = document.getElementById('claudeStatus');
-const simplifyHsk4 = document.getElementById('simplifyHsk4');
-const useClaude = document.getElementById('useClaude');
-const useOpus = document.getElementById('useOpus');
+// --- File picker ---
+const dropZone = $('dropZone');
+const fileInput = $('fileInput');
+let selectedFile = null;
 
-async function checkClaude() {
-    try {
-        const resp = await fetch('/check-claude');
-        const data = await resp.json();
-        if (data.available) {
-            claudeStatus.className = 'claude-status available';
-            claudeStatus.textContent = 'Claude AI ready (API key configured)';
-        } else {
-            claudeStatus.className = 'claude-status missing';
-            if (data.reason === 'no_sdk') {
-                claudeStatus.innerHTML = 'Anthropic SDK not installed. Run: pip install anthropic';
-            } else {
-                claudeStatus.innerHTML = 'ANTHROPIC_API_KEY not set. <a href="https://console.anthropic.com/" target="_blank">Get API key</a>';
-            }
-            simplifyHsk4.disabled = true;
-            useClaude.disabled = true;
-            useOpus.disabled = true;
-        }
-    } catch (e) {
-        claudeStatus.className = 'claude-status missing';
-        claudeStatus.textContent = 'Could not check Claude status';
-        simplifyHsk4.disabled = true;
-        useClaude.disabled = true;
-        useOpus.disabled = true;
-    }
-}
-checkClaude();
+dropZone.onclick = () => fileInput.click();
+dropZone.ondragover = e => { e.preventDefault(); dropZone.classList.add('active'); };
+dropZone.ondragleave = () => dropZone.classList.remove('active');
+dropZone.ondrop = e => {
+    e.preventDefault(); dropZone.classList.remove('active');
+    if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; pickFile(); }
+};
+fileInput.onchange = pickFile;
 
-dropZone.addEventListener('click', () => fileInput.click());
-
-dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropZone.classList.add('drag-over');
-});
-
-dropZone.addEventListener('dragleave', () => {
-    dropZone.classList.remove('drag-over');
-});
-
-dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-over');
-    if (e.dataTransfer.files.length) {
-        fileInput.files = e.dataTransfer.files;
-        updateFileName();
-    }
-});
-
-fileInput.addEventListener('change', updateFileName);
-
-function updateFileName() {
+function pickFile() {
     if (fileInput.files.length) {
-        fileName.textContent = fileInput.files[0].name;
-        btn.disabled = false;
+        selectedFile = fileInput.files[0];
+        $('fileName').textContent = selectedFile.name;
+        dropZone.classList.add('active');
+        $('convertBtn').disabled = false;
     }
 }
 
-form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!fileInput.files.length) return;
+// --- Dependency checks ---
+async function checkDeps() {
+    const deps = $('deps');
+    let html = '';
+    try {
+        const r1 = await fetch('/check-deps');
+        const d = await r1.json();
+        if (d.calibre) html += '<span class="dep-badge ok">Calibre ' + d.calibre_version + '</span>';
+        else html += '<span class="dep-badge miss">No Calibre (AZW3 disabled)</span>';
+        if (d.claude) html += '<span class="dep-badge ok">Claude API ready</span>';
+        else html += '<span class="dep-badge miss">No Claude API</span>';
+        if (d.ffmpeg) html += '<span class="dep-badge ok">ffmpeg (M4B)</span>';
+        else html += '<span class="dep-badge miss">No ffmpeg (ZIP fallback)</span>';
 
-    const kindleOutput = kindleCheckbox.checked;
-    const kindleFormat = document.getElementById('kindleFormat').checked;
-    const formData = new FormData();
-    formData.append('file', fileInput.files[0]);
-    formData.append('add_pinyin', form.querySelector('[name=add_pinyin]').checked);
-    formData.append('add_translation', form.querySelector('[name=add_translation]').checked);
-    formData.append('kindle_format', kindleFormat);
-    formData.append('kindle_output', kindleOutput);
-    formData.append('simplify_hsk4', simplifyHsk4.checked);
-    formData.append('use_claude', useClaude.checked);
-    formData.append('use_opus', useOpus.checked);
+        if (!d.calibre) $('optKindleOutput').disabled = true;
+        if (!d.claude) {
+            const q = $('optQuality');
+            q.querySelectorAll('option').forEach(o => {
+                if (o.value !== 'standard') o.disabled = true;
+            });
+        }
+    } catch(e) {
+        html = '<span class="dep-badge miss">Could not check dependencies</span>';
+    }
+    deps.innerHTML = html;
+}
+checkDeps();
+
+// --- Convert ---
+$('convertBtn').onclick = async () => {
+    if (!selectedFile || selected.size === 0) return;
+
+    const btn = $('convertBtn');
+    const status = $('status');
+    const bar = $('progressBar');
 
     btn.disabled = true;
-    status.className = 'status processing';
-    const formatMsg = kindleOutput ? ' Converting to AZW3 for Kindle.' : '';
-    status.textContent = 'Converting... This may take a while if translation is enabled.' + formatMsg;
+    bar.classList.add('active');
+    status.className = 'status info';
+    status.style.display = 'block';
+    status.textContent = 'Processing...';
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('outputs', JSON.stringify([...selected]));
+    formData.append('target', $('optTarget').value);
+    formData.append('quality', $('optQuality').value);
+    formData.append('add_pinyin', $('optPinyin').checked);
+    formData.append('add_translation', $('optTranslation').checked);
+    formData.append('word_spacing', $('optWordSpacing').checked);
+    formData.append('kindle_format', $('optKindleFormat').checked);
+    formData.append('kindle_output', $('optKindleOutput').checked);
+    formData.append('bilingual', $('optBilingual').checked);
 
     try {
         const resp = await fetch('/convert', { method: 'POST', body: formData });
-        if (!resp.ok) {
-            const err = await resp.text();
-            throw new Error(err);
-        }
-        // Trigger download
+        if (!resp.ok) throw new Error(await resp.text());
+
         const blob = await resp.blob();
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const match = cd.match(/filename="?([^"]+)"?/);
+        const filename = match ? match[1] : 'output.zip';
+
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        const origName = fileInput.files[0].name.replace('.epub', '');
-        const ext = kindleOutput ? '.azw3' : '.epub';
-        a.href = url;
-        a.download = origName + '_graded' + ext;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
         URL.revokeObjectURL(url);
 
-        status.className = 'status done';
-        const formatDone = kindleOutput ? ' (AZW3 for Kindle)' : '';
-        status.textContent = 'Conversion complete!' + formatDone + ' Your download should start automatically.';
-    } catch (err) {
-        status.className = 'status error';
+        status.className = 'status ok';
+        status.textContent = 'Done! Download started.';
+    } catch(err) {
+        status.className = 'status err';
         status.textContent = 'Error: ' + err.message;
     } finally {
         btn.disabled = false;
+        bar.classList.remove('active');
     }
-});
+};
+
+updateUI();
 </script>
 </body>
 </html>
@@ -384,37 +373,40 @@ def index():
     return render_template_string(HTML_PAGE)
 
 
+@app.route('/check-deps')
+def check_deps():
+    """Check all optional dependency availability at once."""
+    import shutil
+
+    calibre = is_calibre_installed()
+    return jsonify({
+        'calibre': calibre,
+        'calibre_version': get_calibre_version() if calibre else None,
+        'claude': is_openrouter_available() and bool(get_api_key()),
+        'ffmpeg': shutil.which('ffmpeg') is not None,
+    })
+
+
+# Keep old endpoints for backwards compat
 @app.route('/check-calibre')
 def check_calibre():
-    """Check if Calibre is installed and return status."""
     available = is_calibre_installed()
-    version = get_calibre_version() if available else None
-    return jsonify({
-        'available': available,
-        'version': version,
-    })
+    return jsonify({'available': available, 'version': get_calibre_version() if available else None})
 
 
 @app.route('/check-claude')
 def check_claude():
-    """Check if Claude/Anthropic API is available."""
-    if not is_anthropic_available():
-        return jsonify({
-            'available': False,
-            'reason': 'no_sdk',
-        })
+    if not is_openrouter_available():
+        return jsonify({'available': False, 'reason': 'no_sdk'})
     if not get_api_key():
-        return jsonify({
-            'available': False,
-            'reason': 'no_api_key',
-        })
-    return jsonify({
-        'available': True,
-    })
+        return jsonify({'available': False, 'reason': 'no_api_key'})
+    return jsonify({'available': True})
 
 
 @app.route('/convert', methods=['POST'])
 def convert():
+    import json
+
     if 'file' not in request.files:
         return 'No file uploaded', 400
 
@@ -422,70 +414,116 @@ def convert():
     if not file.filename or not file.filename.lower().endswith('.epub'):
         return 'Please upload an .epub file', 400
 
+    outputs = json.loads(request.form.get('outputs', '["epub"]'))
+    target = request.form.get('target', 'en')
+    quality = request.form.get('quality', 'standard')
+
     add_pinyin = request.form.get('add_pinyin', 'true') == 'true'
     add_translation = request.form.get('add_translation', 'true') == 'true'
+    word_spacing = request.form.get('word_spacing', 'false') == 'true'
     kindle_format = request.form.get('kindle_format', 'false') == 'true'
     kindle_output = request.form.get('kindle_output', 'false') == 'true'
-    simplify_hsk4 = request.form.get('simplify_hsk4', 'false') == 'true'
-    use_claude = request.form.get('use_claude', 'false') == 'true'
-    use_opus = request.form.get('use_opus', 'false') == 'true'
+    bilingual = request.form.get('bilingual', 'true') == 'true'
 
-    if not add_pinyin and not add_translation:
-        return 'Select at least one option (pinyin or translation)', 400
+    use_claude = quality in ('claude', 'simplified')
+    use_opus = False
+    simplify_hsk4 = quality == 'simplified'
+
+    if not outputs:
+        return 'Select at least one output type', 400
 
     if kindle_output and not is_calibre_installed():
         return 'Calibre is not installed. Cannot convert to AZW3.', 400
 
-    if (simplify_hsk4 or use_claude) and not is_anthropic_available():
-        return 'Anthropic SDK not installed. Install with: pip install anthropic', 400
+    if (simplify_hsk4 or use_claude) and (not is_openrouter_available() or not get_api_key()):
+        return 'Claude API not available. Select Standard quality.', 400
 
-    if (simplify_hsk4 or use_claude) and not get_api_key():
-        return 'ANTHROPIC_API_KEY environment variable not set.', 400
+    orig_name = Path(file.filename).stem
 
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = os.path.join(tmpdir, 'input.epub')
-        epub_output_path = os.path.join(tmpdir, 'output.epub')
-
         file.save(input_path)
 
-        try:
-            process_epub(
-                input_path=input_path,
-                output_path=epub_output_path,
-                add_pinyin=add_pinyin,
-                add_translation=add_translation,
-                kindle_format=kindle_format,
-                simplify_hsk4=simplify_hsk4,
-                use_claude_translator=use_claude,
-                use_opus=use_opus,
-            )
+        generated_files = []  # (filename, path)
 
-            if kindle_output:
-                azw3_output_path = os.path.join(tmpdir, 'output.azw3')
-                convert_epub_to_azw3(
-                    epub_path=epub_output_path,
-                    azw3_path=azw3_output_path,
-                    keep_epub=False,
+        try:
+            # --- Graded reader EPUB/AZW3 ---
+            if 'epub' in outputs:
+                epub_path = os.path.join(tmpdir, 'graded.epub')
+                process_epub(
+                    input_path=input_path,
+                    output_path=epub_path,
+                    add_pinyin=add_pinyin,
+                    add_translation=add_translation,
+                    translation_target=target,
+                    kindle_format=kindle_format,
+                    word_spacing=word_spacing,
+                    simplify_hsk4=simplify_hsk4,
+                    use_claude_translator=use_claude,
+                    use_opus=use_opus,
                 )
-                return send_file(
-                    azw3_output_path,
-                    as_attachment=True,
-                    download_name=file.filename.replace('.epub', '_graded.azw3'),
-                    mimetype='application/x-mobi8-ebook',
+                if kindle_output:
+                    azw3_path = os.path.join(tmpdir, 'graded.azw3')
+                    convert_epub_to_azw3(epub_path=epub_path, azw3_path=azw3_path)
+                    generated_files.append((f'{orig_name}_graded.azw3', azw3_path))
+                else:
+                    generated_files.append((f'{orig_name}_graded.epub', epub_path))
+
+            # --- Anki deck ---
+            if 'anki' in outputs:
+                from graded_reader.anki_generator import generate_anki_deck
+                anki_path = os.path.join(tmpdir, 'flashcards.apkg')
+                generate_anki_deck(
+                    epub_path=input_path,
+                    output_path=anki_path,
+                    translation_target=target,
+                    use_claude=use_claude,
+                    use_opus=use_opus,
                 )
-            else:
-                return send_file(
-                    epub_output_path,
-                    as_attachment=True,
-                    download_name=file.filename.replace('.epub', '_graded.epub'),
-                    mimetype='application/epub+zip',
+                generated_files.append((f'{orig_name}_flashcards.apkg', anki_path))
+
+            # --- Audiobook ---
+            if 'audio' in outputs:
+                from graded_reader.audio_generator import generate_audiobook
+                audio_path = os.path.join(tmpdir, 'audiobook.m4b')
+                result_path = generate_audiobook(
+                    epub_path=input_path,
+                    output_path=audio_path,
+                    translation_target=target,
+                    bilingual=bilingual,
+                    use_claude=use_claude,
+                    use_opus=use_opus,
                 )
+                result_ext = Path(result_path).suffix
+                generated_files.append((
+                    f'{orig_name}_audiobook{result_ext}', result_path,
+                ))
 
         except CalibreNotFoundError as e:
             return f'Calibre error: {e.message}', 500
         except Exception as e:
             logging.exception('Conversion failed')
             return f'Conversion failed: {e}', 500
+
+        if not generated_files:
+            return 'No outputs were generated', 500
+
+        # Single file: send directly
+        if len(generated_files) == 1:
+            fname, fpath = generated_files[0]
+            return send_file(fpath, as_attachment=True, download_name=fname)
+
+        # Multiple files: bundle into ZIP
+        zip_path = os.path.join(tmpdir, 'bundle.zip')
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+            for fname, fpath in generated_files:
+                zf.write(fpath, fname)
+
+        return send_file(
+            zip_path, as_attachment=True,
+            download_name=f'{orig_name}_learning_kit.zip',
+            mimetype='application/zip',
+        )
 
 
 if __name__ == '__main__':

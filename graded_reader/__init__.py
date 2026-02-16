@@ -9,7 +9,7 @@ from .calibre import (
 from .claude_simplifier import (
     simplify_to_hsk4,
     analyze_vocabulary_level,
-    is_anthropic_available,
+    is_openrouter_available,
 )
 from .claude_translator import (
     translate_text_claude,
@@ -25,7 +25,7 @@ __all__ = [
     'CalibreNotFoundError',
     'simplify_to_hsk4',
     'analyze_vocabulary_level',
-    'is_anthropic_available',
+    'is_openrouter_available',
     'translate_text_claude',
     'generate_audiobook',
 ]

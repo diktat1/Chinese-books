@@ -1,8 +1,8 @@
 """
-Translation module using Claude API.
+Translation module using OpenRouter API.
 
 Provides high-quality Chinese to English (or other language) translation
-using Claude as an alternative to Google Translate.
+using Claude (via OpenRouter) as an alternative to Google Translate.
 """
 
 import os
@@ -11,29 +11,42 @@ import logging
 from typing import Optional
 
 try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
+    from openai import OpenAI
+    import openai
+    OPENROUTER_AVAILABLE = True
 except ImportError:
-    ANTHROPIC_AVAILABLE = False
+    OPENROUTER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 # Default model for translation
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
-OPUS_MODEL = "claude-opus-4-0-20250514"
+DEFAULT_MODEL = "anthropic/claude-sonnet-4"
+OPUS_MODEL = "anthropic/claude-opus-4"
 
 # Maximum text length per request (characters)
 MAX_CHUNK_SIZE = 4000
 
 
-def is_anthropic_available() -> bool:
-    """Check if the Anthropic SDK is installed."""
-    return ANTHROPIC_AVAILABLE
+def is_openrouter_available() -> bool:
+    """Check if the OpenAI SDK (for OpenRouter) is installed."""
+    return OPENROUTER_AVAILABLE
 
 
 def get_api_key() -> Optional[str]:
-    """Get Anthropic API key from environment variable."""
-    return os.environ.get('ANTHROPIC_API_KEY')
+    """Get OpenRouter API key from environment variable."""
+    return os.environ.get('OPENROUTER_API_KEY')
+
+
+def _create_client() -> 'OpenAI':
+    """Create an OpenRouter client."""
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.environ.get("OPENROUTER_API_KEY"),
+        default_headers={
+            "HTTP-Referer": "https://github.com/diktat1/Chinese-books",
+            "X-Title": "Chinese Graded Reader",
+        },
+    )
 
 
 def translate_text_claude(
@@ -60,13 +73,13 @@ def translate_text_claude(
         Translated text.
         Returns original text with error note if translation fails.
     """
-    if not ANTHROPIC_AVAILABLE:
-        logger.error("Anthropic SDK not installed. Install with: pip install anthropic")
-        return f"[Translation unavailable - anthropic not installed] {text}"
+    if not OPENROUTER_AVAILABLE:
+        logger.error("OpenAI SDK not installed. Install with: pip install openai")
+        return f"[Translation unavailable - openai not installed] {text}"
 
     api_key = get_api_key()
     if not api_key:
-        logger.error("ANTHROPIC_API_KEY environment variable not set")
+        logger.error("OPENROUTER_API_KEY environment variable not set")
         return f"[Translation unavailable - API key not set] {text}"
 
     text = text.strip()
@@ -128,7 +141,7 @@ def _translate_with_retry(
     max_retries: int,
 ) -> str:
     """Translate text with exponential backoff retry."""
-    client = anthropic.Anthropic()
+    client = _create_client()
 
     system_prompt = f"""You are an expert translator specializing in {source} to {target} translation.
 
@@ -149,19 +162,22 @@ Remember: Output only the {target} translation, nothing else."""
 
     for attempt in range(max_retries):
         try:
-            message = client.messages.create(
+            completion = client.chat.completions.create(
                 model=model,
                 max_tokens=len(text) * 4,  # Allow for expansion
                 messages=[
-                    {"role": "user", "content": user_prompt}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
                 ],
-                system=system_prompt,
             )
 
-            result = message.content[0].text.strip()
-            return result
+            content = completion.choices[0].message.content
+            if content is None:
+                logger.warning("Empty response from API")
+                return text
+            return content.strip()
 
-        except anthropic.RateLimitError as e:
+        except openai.RateLimitError as e:
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
                 logger.warning(
@@ -173,7 +189,7 @@ Remember: Output only the {target} translation, nothing else."""
                 logger.error(f'Translation rate limited after {max_retries} attempts: {e}')
                 return f'[Translation rate limited] {text}'
 
-        except anthropic.APIError as e:
+        except openai.APIError as e:
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
                 logger.warning(
