@@ -3,7 +3,7 @@
 Web app for converting Chinese EPUBs into learning materials.
 
 Upload an EPUB and get back any combination of:
-  - Graded reader EPUB/AZW3 (pinyin + translation)
+  - Graded reader EPUB (pinyin + translation)
   - Anki flashcard deck
   - M4B audiobook with chapter markers
 
@@ -24,12 +24,6 @@ from pathlib import Path
 from flask import Flask, request, send_file, render_template_string, jsonify, Response
 
 from graded_reader.epub_processor import process_epub
-from graded_reader.calibre import (
-    is_calibre_installed,
-    get_calibre_version,
-    convert_epub_to_azw3,
-    CalibreNotFoundError,
-)
 from graded_reader.claude_simplifier import is_openrouter_available, get_api_key
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -125,14 +119,6 @@ HTML_PAGE = '''
         .status.info { display: block; background: #fff3cd; color: #856404; }
         .status.ok { display: block; background: #d4edda; color: #155724; }
         .status.err { display: block; background: #f8d7da; color: #721c24; }
-        /* Dep badges */
-        .dep-badge {
-            display: inline-block; font-size: .78em; padding: 3px 8px;
-            border-radius: 4px; margin-right: 6px; margin-top: 6px;
-        }
-        .dep-badge.ok { background: #d4edda; color: #155724; }
-        .dep-badge.miss { background: #f8d7da; color: #721c24; }
-        .dep-badge a { color: inherit; font-weight: 600; }
         .small { font-size: .78em; color: #aaa; line-height: 1.5; margin-top: 10px; }
         /* Progress bar */
         .progress-bar {
@@ -221,12 +207,10 @@ HTML_PAGE = '''
         <label><input type="checkbox" id="optTranslation" checked> Translation</label>
         <label><input type="checkbox" id="optWordSpacing"> Word spacing</label>
         <label><input type="checkbox" id="optParallelText"> Parallel text</label>
-        <label><input type="checkbox" id="optKindleOutput"> Output as AZW3</label>
     </div>
     <div class="opt-grid" id="audioOptions" style="display:none">
         <label><input type="checkbox" id="optBilingual" checked> Bilingual narration</label>
     </div>
-    <div id="deps"></div>
 </div>
 
 <div class="card">
@@ -290,33 +274,15 @@ function pickFile() {
     }
 }
 
-// --- Dependency checks ---
-async function checkDeps() {
-    const deps = $('deps');
-    let html = '';
-    try {
-        const r1 = await fetch('/check-deps');
-        const d = await r1.json();
-        if (d.calibre) html += '<span class="dep-badge ok">Calibre ' + d.calibre_version + '</span>';
-        else html += '<span class="dep-badge miss">No Calibre (AZW3 disabled)</span>';
-        if (d.claude) html += '<span class="dep-badge ok">Claude API ready</span>';
-        else html += '<span class="dep-badge miss">No Claude API</span>';
-        if (d.ffmpeg) html += '<span class="dep-badge ok">ffmpeg (M4B)</span>';
-        else html += '<span class="dep-badge miss">No ffmpeg (ZIP fallback)</span>';
-
-        if (!d.calibre) $('optKindleOutput').disabled = true;
-        if (!d.claude) {
-            const q = $('optQuality');
-            q.querySelectorAll('option').forEach(o => {
-                if (o.value !== 'standard') o.disabled = true;
-            });
-        }
-    } catch(e) {
-        html = '<span class="dep-badge miss">Could not check dependencies</span>';
+// --- Check Claude availability (disable premium options if unavailable) ---
+fetch('/check-deps').then(r => r.json()).then(d => {
+    if (!d.claude) {
+        const q = $('optQuality');
+        q.querySelectorAll('option').forEach(o => {
+            if (o.value !== 'standard') o.disabled = true;
+        });
     }
-    deps.innerHTML = html;
-}
-checkDeps();
+}).catch(() => {});
 
 // --- Convert with SSE progress ---
 $('convertBtn').onclick = async () => {
@@ -343,7 +309,6 @@ $('convertBtn').onclick = async () => {
     formData.append('add_translation', $('optTranslation').checked);
     formData.append('word_spacing', $('optWordSpacing').checked);
     formData.append('parallel_text', $('optParallelText').checked);
-    formData.append('kindle_output', $('optKindleOutput').checked);
     formData.append('bilingual', $('optBilingual').checked);
 
     try {
@@ -431,37 +396,15 @@ def index():
 
 @app.route('/check-deps')
 def check_deps():
-    """Check all optional dependency availability at once."""
-    import shutil
-
-    calibre = is_calibre_installed()
+    """Check optional dependency availability."""
     return jsonify({
-        'calibre': calibre,
-        'calibre_version': get_calibre_version() if calibre else None,
         'claude': is_openrouter_available() and bool(get_api_key()),
-        'ffmpeg': shutil.which('ffmpeg') is not None,
     })
-
-
-# Keep old endpoints for backwards compat
-@app.route('/check-calibre')
-def check_calibre():
-    available = is_calibre_installed()
-    return jsonify({'available': available, 'version': get_calibre_version() if available else None})
-
-
-@app.route('/check-claude')
-def check_claude():
-    if not is_openrouter_available():
-        return jsonify({'available': False, 'reason': 'no_sdk'})
-    if not get_api_key():
-        return jsonify({'available': False, 'reason': 'no_api_key'})
-    return jsonify({'available': True})
 
 
 def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
                      target, add_pinyin, add_translation, word_spacing,
-                     parallel_text, kindle_output, bilingual,
+                     parallel_text, bilingual,
                      use_claude, use_opus, simplify_hsk4):
     """Background conversion worker."""
     job = _jobs[job_id]
@@ -474,7 +417,7 @@ def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
     generated_files = []
 
     try:
-        # --- Graded reader EPUB/AZW3 ---
+        # --- Graded reader EPUB ---
         if 'epub' in outputs:
             progress(0, 1, 'Building graded reader...')
             epub_path = os.path.join(tmpdir, 'graded.epub')
@@ -491,13 +434,7 @@ def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
                 use_opus=use_opus,
                 progress_callback=progress,
             )
-            if kindle_output:
-                progress(1, 1, 'Converting to AZW3...')
-                azw3_path = os.path.join(tmpdir, 'graded.azw3')
-                convert_epub_to_azw3(epub_path=epub_path, azw3_path=azw3_path)
-                generated_files.append((f'{orig_name}_graded.azw3', azw3_path))
-            else:
-                generated_files.append((f'{orig_name}_graded.epub', epub_path))
+            generated_files.append((f'{orig_name}_graded.epub', epub_path))
 
         # --- Anki deck ---
         if 'anki' in outputs:
@@ -575,7 +512,6 @@ def convert():
     add_translation = request.form.get('add_translation', 'true') == 'true'
     word_spacing = request.form.get('word_spacing', 'false') == 'true'
     parallel_text = request.form.get('parallel_text', 'false') == 'true'
-    kindle_output = request.form.get('kindle_output', 'false') == 'true'
     bilingual = request.form.get('bilingual', 'true') == 'true'
 
     use_claude = quality in ('claude', 'simplified')
@@ -584,9 +520,6 @@ def convert():
 
     if not outputs:
         return 'Select at least one output type', 400
-
-    if kindle_output and not is_calibre_installed():
-        return 'Calibre is not installed. Cannot convert to AZW3.', 400
 
     if (simplify_hsk4 or use_claude) and (not is_openrouter_available() or not get_api_key()):
         return 'Claude API not available. Select Standard quality.', 400
@@ -621,7 +554,7 @@ def convert():
         target=_run_conversion,
         args=(job_id, input_path, orig_name, tmpdir, outputs,
               target, add_pinyin, add_translation, word_spacing,
-              parallel_text, kindle_output, bilingual,
+              parallel_text, bilingual,
               use_claude, use_opus, simplify_hsk4),
         daemon=True,
     )
