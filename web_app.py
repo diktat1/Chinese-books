@@ -820,17 +820,24 @@ def progress(job_id):
     import time
 
     def stream():
+        last_data = None
         while True:
             job = _jobs.get(job_id)
             if not job:
                 yield f"data: {json.dumps({'status': 'error', 'message': 'Job not found'})}\n\n"
                 break
 
-            yield f"data: {json.dumps({'status': job['status'], 'progress': job['progress'], 'message': job['message']})}\n\n"
+            data = json.dumps({'status': job['status'], 'progress': job['progress'], 'message': job['message']})
+            if data != last_data:
+                yield f"data: {data}\n\n"
+                last_data = data
 
             if job['status'] in ('done', 'error'):
                 break
-            time.sleep(0.5)
+
+            # Send SSE comment as heartbeat to prevent proxy idle timeout
+            yield ": heartbeat\n\n"
+            time.sleep(1)
 
     return Response(stream(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
