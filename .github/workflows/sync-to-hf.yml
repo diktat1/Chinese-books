@@ -11,7 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           lfs: true
 
       - name: Push to Hugging Face
@@ -20,5 +19,12 @@ jobs:
         run: |
           git config --global credential.helper store
           echo "https://bright83:${HF_TOKEN}@huggingface.co" > ~/.git-credentials
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Create clean orphan commit without binary files (HF rejects binaries via Xet policy)
+          git checkout --orphan hf-deploy
+          rm -f input-epubs/*.epub sample_*.epub
+          git add -A
+          git commit -m "Deploy to HF Spaces"
           git remote add hf https://huggingface.co/spaces/bright83/language-study
-          git push hf main:main --force
+          git push hf hf-deploy:main --force
