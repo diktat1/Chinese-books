@@ -19,34 +19,9 @@ from bs4 import BeautifulSoup
 from ebooklib import epub
 from pypinyin import pinyin, Style
 
-from .chinese_processing import contains_chinese, is_chinese_char, segment_text
+from .chinese_processing import contains_chinese, is_chinese_char, segment_text, split_sentences
 
 logger = logging.getLogger(__name__)
-
-# Chinese sentence-ending punctuation
-_SENTENCE_ENDERS = re.compile(r'([。！？；…]+)')
-
-
-def _split_sentences(text: str) -> list[str]:
-    """
-    Split Chinese text into sentences at sentence-ending punctuation.
-    Keeps the punctuation attached to the sentence.
-    """
-    parts = _SENTENCE_ENDERS.split(text)
-    sentences = []
-    i = 0
-    while i < len(parts):
-        s = parts[i].strip()
-        # Attach the punctuation delimiter to the preceding text
-        if i + 1 < len(parts):
-            s += parts[i + 1]
-            i += 2
-        else:
-            i += 1
-        s = s.strip()
-        if s and contains_chinese(s):
-            sentences.append(s)
-    return sentences
 
 
 def _text_to_pinyin(text: str) -> str:
@@ -101,7 +76,7 @@ def _extract_sentences_from_epub(epub_path: str) -> list[str]:
             text = block.get_text().strip()
             if not text or not contains_chinese(text):
                 continue
-            for sentence in _split_sentences(text):
+            for sentence in split_sentences(text):
                 if len(sentence) >= 2:  # Skip single characters
                     sentences.append(sentence)
 

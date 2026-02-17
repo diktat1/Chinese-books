@@ -42,7 +42,7 @@ Examples:
   python convert.py book.epub --word-spacing           # Add spaces between words for Kindle lookup
   python convert.py book.epub --kindle                 # Output AZW3 for Kindle (requires Calibre)
   python convert.py book.epub --kindle --no-keep-epub  # AZW3 only, delete intermediate EPUB
-  python convert.py book.epub --kindle-format          # Paragraph format (Chinese, pinyin, English)
+  python convert.py book.epub --parallel-text           # Side-by-side Chinese + translation columns
   python convert.py book.epub --simplify-hsk4          # Simplify to HSK 4 vocabulary (requires Claude)
   python convert.py book.epub --use-claude             # Use Claude for translation (higher quality)
   python convert.py book.epub --simplify-hsk4 --use-opus  # Use Opus model for best quality
@@ -86,11 +86,11 @@ Examples:
         help='Add spaces between Chinese words for easier dictionary lookup on e-readers',
     )
     parser.add_argument(
-        '--kindle-format',
+        '--parallel-text',
         action='store_true',
-        help='Use paragraph-by-paragraph format instead of ruby annotations. '
-             'Outputs: Chinese paragraph (with word spacing), pinyin paragraph, '
-             'English translation. Works better on Kindle which has poor ruby support.',
+        help='Two-column layout: Chinese sentences on the left, translations on '
+             'the right, aligned row-by-row. Uses table layout for maximum '
+             'e-reader compatibility. Requires translation to be enabled.',
     )
     parser.add_argument(
         '--kindle', '--azw3',
@@ -303,8 +303,8 @@ Examples:
         mode_parts.append(f'translation ({args.source} -> {args.target}, {translator}{model_note})')
     if args.word_spacing:
         mode_parts.append('word-spacing')
-    if args.kindle_format:
-        mode_parts.append('kindle-format (paragraph-by-paragraph)')
+    if args.parallel_text:
+        mode_parts.append('parallel-text (side-by-side)')
     if args.kindle:
         mode_parts.append(f'kindle ({args.kindle_profile})')
 
@@ -316,6 +316,11 @@ Examples:
     print(f'Mode:   {" + ".join(mode_parts)}')
     print()
 
+    # Validate flag combinations
+    if args.parallel_text and args.pinyin_only:
+        print('Error: --parallel-text requires translation. Cannot use with --pinyin-only.', file=sys.stderr)
+        sys.exit(1)
+
     process_epub(
         input_path=str(input_path),
         output_path=str(output_path),
@@ -324,7 +329,7 @@ Examples:
         translation_source=args.source,
         translation_target=args.target,
         word_spacing=args.word_spacing,
-        kindle_format=args.kindle_format,
+        parallel_text=args.parallel_text,
         simplify_hsk4=args.simplify_hsk4,
         use_claude_translator=args.use_claude,
         use_opus=args.use_opus,

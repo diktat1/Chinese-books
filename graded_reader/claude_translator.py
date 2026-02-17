@@ -208,6 +208,117 @@ Remember: Output only the {target} translation, nothing else."""
     return text
 
 
+def translate_sentences_claude(
+    sentences: list[str],
+    source: str = 'Chinese',
+    target: str = 'English',
+    use_opus: bool = False,
+    max_retries: int = 3,
+) -> list[str]:
+    """
+    Translate a list of Chinese sentences, returning one translation per sentence.
+
+    Uses a single API call with numbered format for alignment. If the response
+    count doesn't match input count, falls back to per-sentence translation.
+
+    Args:
+        sentences: List of Chinese sentences to translate.
+        source: Source language name.
+        target: Target language name.
+        use_opus: If True, use Claude Opus model.
+        max_retries: Number of retry attempts.
+
+    Returns:
+        List of translations, one per input sentence.
+    """
+    if not sentences:
+        return []
+
+    if not OPENROUTER_AVAILABLE or not get_api_key():
+        # Fall back to per-sentence translation
+        return [translate_text_claude(s, source, target, use_opus, max_retries)
+                for s in sentences]
+
+    # Single sentence — just translate directly
+    if len(sentences) == 1:
+        return [translate_text_claude(sentences[0], source, target, use_opus, max_retries)]
+
+    source = _normalize_language(source)
+    target = _normalize_language(target)
+    model = OPUS_MODEL if use_opus else DEFAULT_MODEL
+
+    numbered_input = "\n".join(f"{i+1}. {s}" for i, s in enumerate(sentences))
+
+    system_prompt = (
+        f"You are an expert translator from {source} to {target}. "
+        f"You will receive numbered sentences. Translate each one separately. "
+        f"Return ONLY the translations, numbered to match. One translation per line. "
+        f"Do not combine, split, reorder, or skip any sentences."
+    )
+    user_prompt = numbered_input
+
+    client = _create_client()
+
+    for attempt in range(max_retries):
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                max_tokens=sum(len(s) for s in sentences) * 4,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+
+            content = completion.choices[0].message.content
+            if content is None:
+                break
+
+            # Parse numbered lines
+            lines = [line.strip() for line in content.strip().split("\n") if line.strip()]
+            translations = []
+            for line in lines:
+                # Strip leading number and punctuation: "1. text" or "1) text"
+                import re as _re
+                cleaned = _re.sub(r'^\d+[\.\)]\s*', '', line)
+                if cleaned:
+                    translations.append(cleaned)
+
+            if len(translations) == len(sentences):
+                return translations
+
+            # Count mismatch — retry or fall back
+            logger.warning(
+                f"Sentence count mismatch: expected {len(sentences)}, "
+                f"got {len(translations)}. Attempt {attempt + 1}/{max_retries}."
+            )
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+
+        except openai.RateLimitError:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))
+            else:
+                break
+        except openai.APIError:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))
+            else:
+                break
+        except Exception as e:
+            logger.error(f"Unexpected error in batch translation: {e}")
+            break
+
+    # Fall back: translate each sentence individually
+    logger.info("Falling back to per-sentence translation")
+    results = []
+    for s in sentences:
+        results.append(translate_text_claude(s, source, target, use_opus, max_retries))
+        time.sleep(0.3)
+    return results
+
+
 def _split_text(text: str, max_size: int) -> list[str]:
     """
     Split text into chunks, preferring sentence boundaries.

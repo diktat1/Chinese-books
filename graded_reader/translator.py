@@ -43,6 +43,25 @@ def translate_text(text: str, source: str = 'zh-CN', target: str = 'en') -> str:
     return ' '.join(translated_chunks)
 
 
+def translate_sentences(
+    sentences: list[str],
+    source: str = 'zh-CN',
+    target: str = 'en',
+) -> list[str]:
+    """
+    Translate a list of sentences individually via Google Translate.
+
+    Returns a list of translations, one per input sentence.
+    """
+    translations = []
+    for i, sentence in enumerate(sentences):
+        translation = _translate_with_retry(sentence, source, target)
+        translations.append(translation)
+        if i < len(sentences) - 1:
+            time.sleep(0.3)
+    return translations
+
+
 def _translate_with_retry(
     text: str, source: str, target: str, max_retries: int = 3
 ) -> str:

@@ -13,8 +13,34 @@ import re
 import jieba
 from pypinyin import pinyin, Style
 
+# Chinese sentence-ending punctuation
+_SENTENCE_ENDERS = re.compile(r'([。！？；…]+)')
+
 # Zero-width space: invisible but creates a word boundary for e-readers
 WORD_BOUNDARY = '\u200b'
+
+
+def split_sentences(text: str) -> list[str]:
+    """
+    Split Chinese text into sentences at sentence-ending punctuation.
+    Keeps the punctuation attached to the sentence.
+    Returns only non-empty segments that contain Chinese characters.
+    """
+    parts = _SENTENCE_ENDERS.split(text)
+    sentences = []
+    i = 0
+    while i < len(parts):
+        s = parts[i].strip()
+        # Attach the punctuation delimiter to the preceding text
+        if i + 1 < len(parts):
+            s += parts[i + 1]
+            i += 2
+        else:
+            i += 1
+        s = s.strip()
+        if s and contains_chinese(s):
+            sentences.append(s)
+    return sentences
 
 
 def is_chinese_char(char: str) -> bool:

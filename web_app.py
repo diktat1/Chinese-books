@@ -17,9 +17,11 @@ import os
 import tempfile
 import logging
 import zipfile
+import uuid
+import threading
 from pathlib import Path
 
-from flask import Flask, request, send_file, render_template_string, jsonify
+from flask import Flask, request, send_file, render_template_string, jsonify, Response
 
 from graded_reader.epub_processor import process_epub
 from graded_reader.calibre import (
@@ -34,6 +36,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB max upload
+
+# In-memory job store for SSE progress tracking
+_jobs = {}  # job_id -> {status, progress, message, result_files, tmpdir, error}
 
 HTML_PAGE = '''
 <!DOCTYPE html>
@@ -137,10 +142,14 @@ HTML_PAGE = '''
         .progress-bar.active { display: block; }
         .progress-bar .fill {
             height: 100%; background: #e74c3c; border-radius: 2px;
-            animation: progress 2s ease-in-out infinite;
+            transition: width 0.3s ease;
+            width: 0%;
         }
-        @keyframes progress {
-            0% { width: 0; } 50% { width: 80%; } 100% { width: 100%; }
+        .progress-bar.indeterminate .fill {
+            animation: indeterminate 2s ease-in-out infinite;
+        }
+        @keyframes indeterminate {
+            0% { width: 0; margin-left: 0; } 50% { width: 60%; margin-left: 20%; } 100% { width: 0; margin-left: 100%; }
         }
     </style>
 </head>
@@ -211,7 +220,7 @@ HTML_PAGE = '''
         <label><input type="checkbox" id="optPinyin" checked> Pinyin annotations</label>
         <label><input type="checkbox" id="optTranslation" checked> Translation</label>
         <label><input type="checkbox" id="optWordSpacing"> Word spacing</label>
-        <label><input type="checkbox" id="optKindleFormat"> Kindle format</label>
+        <label><input type="checkbox" id="optParallelText"> Parallel text</label>
         <label><input type="checkbox" id="optKindleOutput"> Output as AZW3</label>
     </div>
     <div class="opt-grid" id="audioOptions" style="display:none">
@@ -309,19 +318,21 @@ async function checkDeps() {
 }
 checkDeps();
 
-// --- Convert ---
+// --- Convert with SSE progress ---
 $('convertBtn').onclick = async () => {
     if (!selectedFile || selected.size === 0) return;
 
     const btn = $('convertBtn');
     const status = $('status');
     const bar = $('progressBar');
+    const fill = bar.querySelector('.fill');
 
     btn.disabled = true;
-    bar.classList.add('active');
+    bar.classList.add('active', 'indeterminate');
+    fill.style.width = '0%';
     status.className = 'status info';
     status.style.display = 'block';
-    status.textContent = 'Processing...';
+    status.textContent = 'Uploading...';
 
     const formData = new FormData();
     formData.append('file', selectedFile);
@@ -331,18 +342,51 @@ $('convertBtn').onclick = async () => {
     formData.append('add_pinyin', $('optPinyin').checked);
     formData.append('add_translation', $('optTranslation').checked);
     formData.append('word_spacing', $('optWordSpacing').checked);
-    formData.append('kindle_format', $('optKindleFormat').checked);
+    formData.append('parallel_text', $('optParallelText').checked);
     formData.append('kindle_output', $('optKindleOutput').checked);
     formData.append('bilingual', $('optBilingual').checked);
 
     try {
-        const resp = await fetch('/convert', { method: 'POST', body: formData });
-        if (!resp.ok) throw new Error(await resp.text());
+        // Step 1: Start the job
+        const startResp = await fetch('/convert', { method: 'POST', body: formData });
+        if (!startResp.ok) throw new Error(await startResp.text());
+        const { job_id } = await startResp.json();
 
-        const blob = await resp.blob();
-        const cd = resp.headers.get('Content-Disposition') || '';
+        // Step 2: Listen for SSE progress
+        bar.classList.remove('indeterminate');
+        status.textContent = 'Processing...';
+
+        await new Promise((resolve, reject) => {
+            const es = new EventSource('/progress/' + job_id);
+            es.onmessage = (e) => {
+                const d = JSON.parse(e.data);
+                if (d.progress !== undefined) {
+                    fill.style.width = d.progress + '%';
+                }
+                if (d.message) {
+                    status.textContent = d.message;
+                }
+                if (d.status === 'done') {
+                    es.close();
+                    resolve();
+                } else if (d.status === 'error') {
+                    es.close();
+                    reject(new Error(d.message || 'Conversion failed'));
+                }
+            };
+            es.onerror = () => { es.close(); reject(new Error('Connection lost')); };
+        });
+
+        // Step 3: Download the result
+        fill.style.width = '100%';
+        status.textContent = 'Downloading...';
+        const dlResp = await fetch('/download/' + job_id);
+        if (!dlResp.ok) throw new Error(await dlResp.text());
+
+        const blob = await dlResp.blob();
+        const cd = dlResp.headers.get('Content-Disposition') || '';
         const match = cd.match(/filename="?([^"]+)"?/);
-        const filename = match ? match[1] : 'output.zip';
+        const filename = match ? match[1] : 'output.epub';
 
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -357,9 +401,21 @@ $('convertBtn').onclick = async () => {
         status.textContent = 'Error: ' + err.message;
     } finally {
         btn.disabled = false;
-        bar.classList.remove('active');
+        bar.classList.remove('active', 'indeterminate');
     }
 };
+
+// Parallel text requires translation
+$('optParallelText').addEventListener('change', function() {
+    if (this.checked && !$('optTranslation').checked) {
+        $('optTranslation').checked = true;
+    }
+});
+$('optTranslation').addEventListener('change', function() {
+    if (!this.checked && $('optParallelText').checked) {
+        $('optParallelText').checked = false;
+    }
+});
 
 updateUI();
 </script>
@@ -403,6 +459,103 @@ def check_claude():
     return jsonify({'available': True})
 
 
+def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
+                     target, add_pinyin, add_translation, word_spacing,
+                     parallel_text, kindle_output, bilingual,
+                     use_claude, use_opus, simplify_hsk4):
+    """Background conversion worker."""
+    job = _jobs[job_id]
+
+    def progress(step, total, message):
+        pct = int(step / max(total, 1) * 100) if total else 0
+        job['progress'] = pct
+        job['message'] = message
+
+    generated_files = []
+
+    try:
+        # --- Graded reader EPUB/AZW3 ---
+        if 'epub' in outputs:
+            progress(0, 1, 'Building graded reader...')
+            epub_path = os.path.join(tmpdir, 'graded.epub')
+            process_epub(
+                input_path=input_path,
+                output_path=epub_path,
+                add_pinyin=add_pinyin,
+                add_translation=add_translation,
+                translation_target=target,
+                parallel_text=parallel_text,
+                word_spacing=word_spacing,
+                simplify_hsk4=simplify_hsk4,
+                use_claude_translator=use_claude,
+                use_opus=use_opus,
+                progress_callback=progress,
+            )
+            if kindle_output:
+                progress(1, 1, 'Converting to AZW3...')
+                azw3_path = os.path.join(tmpdir, 'graded.azw3')
+                convert_epub_to_azw3(epub_path=epub_path, azw3_path=azw3_path)
+                generated_files.append((f'{orig_name}_graded.azw3', azw3_path))
+            else:
+                generated_files.append((f'{orig_name}_graded.epub', epub_path))
+
+        # --- Anki deck ---
+        if 'anki' in outputs:
+            progress(0, 1, 'Generating flashcards...')
+            from graded_reader.anki_generator import generate_anki_deck
+            anki_path = os.path.join(tmpdir, 'flashcards.apkg')
+            generate_anki_deck(
+                epub_path=input_path,
+                output_path=anki_path,
+                translation_target=target,
+                use_claude=use_claude,
+                use_opus=use_opus,
+            )
+            generated_files.append((f'{orig_name}_flashcards.apkg', anki_path))
+
+        # --- Audiobook ---
+        if 'audio' in outputs:
+            progress(0, 1, 'Generating audiobook...')
+            from graded_reader.audio_generator import generate_audiobook
+            audio_path = os.path.join(tmpdir, 'audiobook.m4b')
+            result_path = generate_audiobook(
+                epub_path=input_path,
+                output_path=audio_path,
+                translation_target=target,
+                bilingual=bilingual,
+                use_claude=use_claude,
+                use_opus=use_opus,
+            )
+            result_ext = Path(result_path).suffix
+            generated_files.append((
+                f'{orig_name}_audiobook{result_ext}', result_path,
+            ))
+
+        if not generated_files:
+            job['status'] = 'error'
+            job['message'] = 'No outputs were generated'
+            return
+
+        # Bundle if multiple files
+        if len(generated_files) == 1:
+            job['result_files'] = generated_files
+        else:
+            zip_path = os.path.join(tmpdir, 'bundle.zip')
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+                for fname, fpath in generated_files:
+                    zf.write(fpath, fname)
+            job['result_files'] = [(f'{orig_name}_learning_kit.zip', zip_path)]
+
+        job['status'] = 'done'
+        job['progress'] = 100
+        job['message'] = 'Done!'
+
+    except Exception as e:
+        logging.exception('Conversion failed')
+        job['status'] = 'error'
+        job['message'] = f'Conversion failed: {e}'
+
+
 @app.route('/convert', methods=['POST'])
 def convert():
     import json
@@ -421,7 +574,7 @@ def convert():
     add_pinyin = request.form.get('add_pinyin', 'true') == 'true'
     add_translation = request.form.get('add_translation', 'true') == 'true'
     word_spacing = request.form.get('word_spacing', 'false') == 'true'
-    kindle_format = request.form.get('kindle_format', 'false') == 'true'
+    parallel_text = request.form.get('parallel_text', 'false') == 'true'
     kindle_output = request.form.get('kindle_output', 'false') == 'true'
     bilingual = request.form.get('bilingual', 'true') == 'true'
 
@@ -440,90 +593,79 @@ def convert():
 
     orig_name = Path(file.filename).stem
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, 'input.epub')
-        file.save(input_path)
+    # Validate EPUB before starting
+    tmpdir = tempfile.mkdtemp()
+    input_path = os.path.join(tmpdir, 'input.epub')
+    file.save(input_path)
 
-        generated_files = []  # (filename, path)
+    try:
+        from ebooklib import epub as epub_lib
+        test_book = epub_lib.read_epub(input_path, options={'ignore_ncx': True})
+        items = list(test_book.get_items_of_type(9))
+        if not items:
+            return 'This EPUB has no readable content (no HTML documents found).', 400
+    except Exception as e:
+        return f'Invalid or corrupted EPUB file: {e}', 400
 
-        try:
-            # --- Graded reader EPUB/AZW3 ---
-            if 'epub' in outputs:
-                epub_path = os.path.join(tmpdir, 'graded.epub')
-                process_epub(
-                    input_path=input_path,
-                    output_path=epub_path,
-                    add_pinyin=add_pinyin,
-                    add_translation=add_translation,
-                    translation_target=target,
-                    kindle_format=kindle_format,
-                    word_spacing=word_spacing,
-                    simplify_hsk4=simplify_hsk4,
-                    use_claude_translator=use_claude,
-                    use_opus=use_opus,
-                )
-                if kindle_output:
-                    azw3_path = os.path.join(tmpdir, 'graded.azw3')
-                    convert_epub_to_azw3(epub_path=epub_path, azw3_path=azw3_path)
-                    generated_files.append((f'{orig_name}_graded.azw3', azw3_path))
-                else:
-                    generated_files.append((f'{orig_name}_graded.epub', epub_path))
+    # Start background job
+    job_id = str(uuid.uuid4())[:8]
+    _jobs[job_id] = {
+        'status': 'running',
+        'progress': 0,
+        'message': 'Starting...',
+        'result_files': None,
+        'tmpdir': tmpdir,
+    }
 
-            # --- Anki deck ---
-            if 'anki' in outputs:
-                from graded_reader.anki_generator import generate_anki_deck
-                anki_path = os.path.join(tmpdir, 'flashcards.apkg')
-                generate_anki_deck(
-                    epub_path=input_path,
-                    output_path=anki_path,
-                    translation_target=target,
-                    use_claude=use_claude,
-                    use_opus=use_opus,
-                )
-                generated_files.append((f'{orig_name}_flashcards.apkg', anki_path))
+    thread = threading.Thread(
+        target=_run_conversion,
+        args=(job_id, input_path, orig_name, tmpdir, outputs,
+              target, add_pinyin, add_translation, word_spacing,
+              parallel_text, kindle_output, bilingual,
+              use_claude, use_opus, simplify_hsk4),
+        daemon=True,
+    )
+    thread.start()
 
-            # --- Audiobook ---
-            if 'audio' in outputs:
-                from graded_reader.audio_generator import generate_audiobook
-                audio_path = os.path.join(tmpdir, 'audiobook.m4b')
-                result_path = generate_audiobook(
-                    epub_path=input_path,
-                    output_path=audio_path,
-                    translation_target=target,
-                    bilingual=bilingual,
-                    use_claude=use_claude,
-                    use_opus=use_opus,
-                )
-                result_ext = Path(result_path).suffix
-                generated_files.append((
-                    f'{orig_name}_audiobook{result_ext}', result_path,
-                ))
+    return jsonify({'job_id': job_id})
 
-        except CalibreNotFoundError as e:
-            return f'Calibre error: {e.message}', 500
-        except Exception as e:
-            logging.exception('Conversion failed')
-            return f'Conversion failed: {e}', 500
 
-        if not generated_files:
-            return 'No outputs were generated', 500
+@app.route('/progress/<job_id>')
+def progress(job_id):
+    """SSE endpoint for real-time progress updates."""
+    import time
 
-        # Single file: send directly
-        if len(generated_files) == 1:
-            fname, fpath = generated_files[0]
-            return send_file(fpath, as_attachment=True, download_name=fname)
+    def stream():
+        while True:
+            job = _jobs.get(job_id)
+            if not job:
+                yield f"data: {json.dumps({'status': 'error', 'message': 'Job not found'})}\n\n"
+                break
 
-        # Multiple files: bundle into ZIP
-        zip_path = os.path.join(tmpdir, 'bundle.zip')
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
-            for fname, fpath in generated_files:
-                zf.write(fpath, fname)
+            yield f"data: {json.dumps({'status': job['status'], 'progress': job['progress'], 'message': job['message']})}\n\n"
 
-        return send_file(
-            zip_path, as_attachment=True,
-            download_name=f'{orig_name}_learning_kit.zip',
-            mimetype='application/zip',
-        )
+            if job['status'] in ('done', 'error'):
+                break
+            time.sleep(0.5)
+
+    import json
+    return Response(stream(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/download/<job_id>')
+def download(job_id):
+    """Download completed conversion result."""
+    job = _jobs.get(job_id)
+    if not job:
+        return 'Job not found', 404
+    if job['status'] != 'done':
+        return 'Job not ready', 400
+    if not job['result_files']:
+        return 'No files generated', 500
+
+    fname, fpath = job['result_files'][0]
+    return send_file(fpath, as_attachment=True, download_name=fname)
 
 
 if __name__ == '__main__':
