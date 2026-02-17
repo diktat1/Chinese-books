@@ -211,7 +211,7 @@ HTML_PAGE = '''
         <label><input type="checkbox" id="optPinyin" checked> Pinyin annotations</label>
         <label><input type="checkbox" id="optTranslation" checked> Translation</label>
         <label><input type="checkbox" id="optWordSpacing"> Word spacing</label>
-        <label><input type="checkbox" id="optKindleFormat"> Kindle format</label>
+        <label><input type="checkbox" id="optParallelText"> Parallel text</label>
         <label><input type="checkbox" id="optKindleOutput"> Output as AZW3</label>
     </div>
     <div class="opt-grid" id="audioOptions" style="display:none">
@@ -331,7 +331,7 @@ $('convertBtn').onclick = async () => {
     formData.append('add_pinyin', $('optPinyin').checked);
     formData.append('add_translation', $('optTranslation').checked);
     formData.append('word_spacing', $('optWordSpacing').checked);
-    formData.append('kindle_format', $('optKindleFormat').checked);
+    formData.append('parallel_text', $('optParallelText').checked);
     formData.append('kindle_output', $('optKindleOutput').checked);
     formData.append('bilingual', $('optBilingual').checked);
 
@@ -360,6 +360,18 @@ $('convertBtn').onclick = async () => {
         bar.classList.remove('active');
     }
 };
+
+// Parallel text requires translation
+$('optParallelText').addEventListener('change', function() {
+    if (this.checked && !$('optTranslation').checked) {
+        $('optTranslation').checked = true;
+    }
+});
+$('optTranslation').addEventListener('change', function() {
+    if (!this.checked && $('optParallelText').checked) {
+        $('optParallelText').checked = false;
+    }
+});
 
 updateUI();
 </script>
@@ -421,7 +433,7 @@ def convert():
     add_pinyin = request.form.get('add_pinyin', 'true') == 'true'
     add_translation = request.form.get('add_translation', 'true') == 'true'
     word_spacing = request.form.get('word_spacing', 'false') == 'true'
-    kindle_format = request.form.get('kindle_format', 'false') == 'true'
+    parallel_text = request.form.get('parallel_text', 'false') == 'true'
     kindle_output = request.form.get('kindle_output', 'false') == 'true'
     bilingual = request.form.get('bilingual', 'true') == 'true'
 
@@ -456,7 +468,7 @@ def convert():
                     add_pinyin=add_pinyin,
                     add_translation=add_translation,
                     translation_target=target,
-                    kindle_format=kindle_format,
+                    parallel_text=parallel_text,
                     word_spacing=word_spacing,
                     simplify_hsk4=simplify_hsk4,
                     use_claude_translator=use_claude,

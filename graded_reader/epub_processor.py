@@ -16,12 +16,13 @@ warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 from .chinese_processing import (
     annotate_text,
     contains_chinese,
+    split_sentences,
     text_to_spaced_chinese,
     text_to_pinyin,
 )
-from .translator import translate_text
+from .translator import translate_text, translate_sentences
 from .claude_simplifier import simplify_to_hsk4, is_openrouter_available as is_simplifier_available
-from .claude_translator import translate_text_claude
+from .claude_translator import translate_text_claude, translate_sentences_claude
 
 logger = logging.getLogger(__name__)
 
@@ -112,35 +113,45 @@ blockquote {
     font-family: Georgia, "Times New Roman", serif;
 }
 
-/* Kindle-optimized paragraph format styling */
-.chinese-text {
-    font-size: 1.3em;
-    line-height: 1.8;
-    margin-bottom: 0.2em;
-    letter-spacing: 0.05em;
+/* Parallel text (two-column) table layout */
+.parallel-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    margin-bottom: 1.2em;
 }
 
-.pinyin-text {
-    font-size: 0.85em;
-    color: #555;
-    line-height: 1.3;
-    margin-bottom: 0.3em;
+.parallel-table td {
+    width: 50%;
+    vertical-align: top;
+    padding: 0.4em 0.6em;
+    border-bottom: 1px solid #eee;
+}
+
+.parallel-table td.zh-col {
+    font-size: 1.1em;
+    line-height: 2.0;
+}
+
+.parallel-table td.en-col {
+    font-size: 0.9em;
+    color: #444;
+    font-style: italic;
+    line-height: 1.6;
     font-family: Georgia, "Times New Roman", serif;
 }
 
-/* Heading sizes in kindle format */
-h1.chinese-text { font-size: 1.6em; }
-h2.chinese-text { font-size: 1.5em; }
-h3.chinese-text { font-size: 1.4em; }
+.parallel-heading {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
 
-/* Pinyin/translation for list items: keep as inline blocks */
-li .pinyin-inline {
-    display: block;
-    font-size: 0.85em;
-    color: #555;
-    line-height: 1.3;
-    margin-top: 0.1em;
-    font-family: Georgia, "Times New Roman", serif;
+.parallel-heading td {
+    vertical-align: middle;
+    padding: 0.3em 0.6em;
+    font-weight: bold;
 }
 
 /* Word-level spans for Kindle dictionary lookup */
@@ -158,8 +169,11 @@ li .pinyin-inline {
         color: #bbb;
         border-left-color: #555;
     }
-    .pinyin-text, li .pinyin-inline {
-        color: #aaa;
+    .parallel-table td {
+        border-bottom-color: #333;
+    }
+    .parallel-table td.en-col {
+        color: #bbb;
     }
 }
 '''
@@ -173,7 +187,7 @@ def process_epub(
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
     word_spacing: bool = False,
-    kindle_format: bool = False,
+    parallel_text: bool = False,
     simplify_hsk4: bool = False,
     use_claude_translator: bool = False,
     use_opus: bool = False,
@@ -190,9 +204,8 @@ def process_epub(
         translation_source: Source language code for translation.
         translation_target: Target language code for translation.
         word_spacing: Whether to add spaces between Chinese words for dictionary lookup.
-        kindle_format: If True, use paragraph-by-paragraph format instead of ruby.
-                       Outputs: Chinese paragraph, pinyin paragraph, translation paragraph.
-                       This works better on Kindle which has poor ruby support.
+        parallel_text: If True, use two-column table layout with Chinese sentences
+                       on the left and translations on the right, aligned row-by-row.
         simplify_hsk4: If True, simplify Chinese vocabulary to HSK 4 level using Claude.
         use_claude_translator: If True, use Claude for translation instead of Google Translate.
         use_opus: If True, use Claude Opus model for higher quality (slower, more expensive).
@@ -230,7 +243,7 @@ def process_epub(
             translation_source=translation_source,
             translation_target=translation_target,
             word_spacing=word_spacing,
-            kindle_format=kindle_format,
+            parallel_text=parallel_text,
             simplify_hsk4=simplify_hsk4,
             use_claude_translator=use_claude_translator,
             use_opus=use_opus,
@@ -384,7 +397,7 @@ def _process_html_content(
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
     word_spacing: bool = False,
-    kindle_format: bool = False,
+    parallel_text: bool = False,
     simplify_hsk4: bool = False,
     use_claude_translator: bool = False,
     use_opus: bool = False,
@@ -393,8 +406,8 @@ def _process_html_content(
     Process a single HTML document: annotate Chinese text nodes with
     pinyin and insert English translations after Chinese paragraphs.
 
-    If kindle_format is True, uses paragraph-by-paragraph format instead of
-    ruby annotations (Chinese paragraph, pinyin paragraph, translation paragraph).
+    If parallel_text is True, uses two-column table layout with Chinese
+    sentences on the left and translations on the right.
 
     If simplify_hsk4 is True, simplifies vocabulary to HSK 4 level before processing.
     If use_claude_translator is True, uses Claude instead of Google Translate.
@@ -446,16 +459,16 @@ def _process_html_content(
                 block.string = simplified_text
                 plain_text = simplified_text
 
-        if kindle_format:
-            # Kindle-optimized paragraph-by-paragraph format
-            _process_block_kindle_format(
+        if parallel_text and add_translation:
+            # Two-column parallel text layout
+            _process_block_parallel_text(
                 block, soup, plain_text,
                 add_pinyin=add_pinyin,
-                add_translation=add_translation,
                 translation_source=translation_source,
                 translation_target=translation_target,
                 use_claude_translator=use_claude_translator,
                 use_opus=use_opus,
+                word_spacing=word_spacing,
             )
         else:
             # Standard ruby annotation format
@@ -571,84 +584,140 @@ def _add_translation_to_block(
         block.insert_before(trans_div)
 
 
-def _process_block_kindle_format(
-    block: Tag,
-    soup: BeautifulSoup,
+def _get_parallel_translations(
     plain_text: str,
-    add_pinyin: bool = True,
-    add_translation: bool = True,
-    translation_source: str = 'zh-CN',
-    translation_target: str = 'en',
-    use_claude_translator: bool = False,
-    use_opus: bool = False,
-) -> None:
+    translation_source: str,
+    translation_target: str,
+    use_claude_translator: bool,
+    use_opus: bool,
+) -> list[tuple[str, str]]:
     """
-    Process a block element using Kindle-optimized paragraph format.
-    Order: Translation (target language) → Chinese text → Pinyin.
+    Split Chinese text into sentences and get aligned translations.
 
-    For <p>, <h*>, <blockquote>, <caption>, <div>, <section>, etc.:
-        Inserts translation before and pinyin after the block.
-
-    For <li>, <td>, <th>, <dt>, <dd>:
-        Prepends translation and appends pinyin inline inside the element
-        (inserting siblings would break list/table/definition list structure).
-
-    Uses zero-width spaces for word boundaries so Kindle can identify
-    words for dictionary lookup.
+    Returns a list of (chinese_sentence, translation) tuples.
+    Falls back to a single paragraph pair on any failure.
     """
-    spaced_chinese = text_to_spaced_chinese(plain_text)
-    pinyin_text = text_to_pinyin(plain_text) if add_pinyin else None
+    sentences = split_sentences(plain_text)
 
-    translation = None
-    if add_translation:
+    if not sentences:
+        # No sentence boundaries found — treat whole text as one unit
+        sentences = [plain_text.strip()]
+
+    if len(sentences) == 1:
+        translation = _get_translation(
+            sentences[0], translation_source, translation_target,
+            use_claude_translator, use_opus,
+        )
+        return [(sentences[0], translation or '')]
+
+    # Batch translate
+    try:
+        if use_claude_translator:
+            translations = translate_sentences_claude(
+                sentences,
+                source=translation_source,
+                target=translation_target,
+                use_opus=use_opus,
+            )
+        else:
+            translations = translate_sentences(
+                sentences,
+                source=translation_source,
+                target=translation_target,
+            )
+    except Exception as e:
+        logger.warning(f"Batch sentence translation failed: {e}. Falling back to paragraph.")
         translation = _get_translation(
             plain_text, translation_source, translation_target,
             use_claude_translator, use_opus,
         )
+        return [(plain_text.strip(), translation or '')]
 
-    if block.name in ('li', 'td', 'th', 'dt', 'dd'):
-        # Inline mode: translation first, then Chinese, then pinyin
-        block.clear()
-        block['class'] = block.get('class', [])
-        if isinstance(block['class'], str):
-            block['class'] = [block['class']]
-        block['class'].append('chinese-text')
+    # Pair them up
+    pairs = []
+    for i, zh in enumerate(sentences):
+        en = translations[i] if i < len(translations) else ''
+        # Skip error markers
+        if en.startswith('[Translation'):
+            en = ''
+        pairs.append((zh, en))
+    return pairs
 
-        if translation:
+
+def _process_block_parallel_text(
+    block: Tag,
+    soup: BeautifulSoup,
+    plain_text: str,
+    add_pinyin: bool = True,
+    translation_source: str = 'zh-CN',
+    translation_target: str = 'en',
+    use_claude_translator: bool = False,
+    use_opus: bool = False,
+    word_spacing: bool = False,
+) -> None:
+    """
+    Process a block element using two-column parallel text layout.
+
+    Builds an HTML table with Chinese sentences (with optional ruby pinyin)
+    on the left and translations on the right, one row per sentence.
+
+    For <td>/<th> blocks, falls back to stacked layout to avoid nested tables.
+    For <li> blocks, nests a table inside the list item.
+    """
+    sentence_pairs = _get_parallel_translations(
+        plain_text, translation_source, translation_target,
+        use_claude_translator, use_opus,
+    )
+
+    # For table cells, fall back to standard stacked layout
+    if block.name in ('td', 'th'):
+        if add_pinyin:
+            _annotate_block(block, soup, word_spacing=word_spacing)
+        # Add inline translation
+        full_translation = ' '.join(en for _, en in sentence_pairs if en)
+        if full_translation:
             trans_span = soup.new_tag('span')
             trans_span['class'] = 'translation-inline'
-            trans_span.string = translation
-            block.append(trans_span)
+            trans_span.string = full_translation
+            block.insert(0, trans_span)
+        return
 
-        block.append(NavigableString(spaced_chinese))
+    is_heading = block.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6')
+    table_class = 'parallel-heading' if is_heading else 'parallel-table'
 
-        if pinyin_text:
-            pinyin_span = soup.new_tag('span')
-            pinyin_span['class'] = 'pinyin-inline'
-            pinyin_span.string = pinyin_text
-            block.append(pinyin_span)
-    else:
-        # Sibling mode: translation before block, pinyin after block
-        # Update the original block with word-spaced Chinese
-        parent = block.parent
+    table = soup.new_tag('table')
+    table['class'] = table_class
+
+    for zh_sentence, en_sentence in sentence_pairs:
+        tr = soup.new_tag('tr')
+
+        # Chinese cell
+        td_zh = soup.new_tag('td')
+        td_zh['class'] = 'zh-col'
+
+        if add_pinyin:
+            annotated = annotate_text(zh_sentence, word_spacing=word_spacing)
+            annotated_soup = BeautifulSoup(annotated, 'html.parser')
+            for child in list(annotated_soup.children):
+                td_zh.append(child.extract() if hasattr(child, 'extract') else NavigableString(str(child)))
+        else:
+            if word_spacing:
+                td_zh.string = text_to_spaced_chinese(zh_sentence)
+            else:
+                td_zh.string = zh_sentence
+
+        # Translation cell
+        td_en = soup.new_tag('td')
+        td_en['class'] = 'en-col'
+        td_en.string = en_sentence
+
+        tr.append(td_zh)
+        tr.append(td_en)
+        table.append(tr)
+
+    if block.name == 'li':
+        # Nest table inside the list item to preserve list structure
         block.clear()
-        block['class'] = block.get('class', [])
-        if isinstance(block['class'], str):
-            block['class'] = [block['class']]
-        block['class'].append('chinese-text')
-        block.string = spaced_chinese
-
-        if parent is not None and block.parent is not None:
-            # Insert pinyin after Chinese block
-            if pinyin_text:
-                pinyin_p = soup.new_tag('p')
-                pinyin_p['class'] = 'pinyin-text'
-                pinyin_p.string = pinyin_text
-                block.insert_after(pinyin_p)
-
-            # Insert translation before Chinese block
-            if translation:
-                trans_div = soup.new_tag('div')
-                trans_div['class'] = 'translation'
-                trans_div.string = translation
-                block.insert_before(trans_div)
+        block.append(table)
+    else:
+        block.replace_with(table)
