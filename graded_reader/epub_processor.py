@@ -191,6 +191,7 @@ def process_epub(
     simplify_hsk4: bool = False,
     use_claude_translator: bool = False,
     use_opus: bool = False,
+    progress_callback=None,
 ) -> None:
     """
     Read an EPUB file, add pinyin annotations and/or English translations,
@@ -234,6 +235,8 @@ def process_epub(
 
     for idx, item in enumerate(items, 1):
         logger.info(f'Processing chapter {idx}/{total}: {item.get_name()}')
+        if progress_callback:
+            progress_callback(idx, total, f'Processing chapter {idx}/{total}')
 
         content = item.get_content().decode('utf-8')
         processed = _process_html_content(
