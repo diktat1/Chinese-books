@@ -25,14 +25,22 @@ on:
           - it
           - pt
         default: 'fr'
-      quality:
-        description: 'Quality level'
+      tier:
+        description: 'Translation engine tier'
         type: choice
         options:
-          - standard (Google Translate)
-          - premium (Claude Sonnet)
-          - simplified (Claude + HSK 4)
-        default: 'standard (Google Translate)'
+          - free (Google Translate, no API key)
+          - standard (DeepSeek V3, ~$0.10/book)
+          - premium (Claude Sonnet 4.5, ~$1.65/book)
+        default: 'free (Google Translate, no API key)'
+      model_override:
+        description: 'Override model (OpenRouter ID, leave empty for tier default)'
+        type: string
+        required: false
+      simplify_hsk4:
+        description: 'Simplify vocabulary to HSK 4 level (requires LLM)'
+        type: boolean
+        default: false
       generate_epub:
         description: 'Generate graded reader EPUB'
         type: boolean
@@ -80,8 +88,7 @@ jobs:
       add_translation: ${{ steps.params.outputs.add_translation }}
       word_spacing: ${{ steps.params.outputs.word_spacing }}
       simplify_hsk4: ${{ steps.params.outputs.simplify_hsk4 }}
-      use_claude: ${{ steps.params.outputs.use_claude }}
-      use_opus: ${{ steps.params.outputs.use_opus }}
+      llm_model: ${{ steps.params.outputs.llm_model }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -97,36 +104,35 @@ jobs:
             echo "generate_epub=${{ inputs.generate_epub }}" >> $GITHUB_OUTPUT
             echo "generate_anki=${{ inputs.generate_anki }}" >> $GITHUB_OUTPUT
             echo "generate_audio=${{ inputs.generate_audio }}" >> $GITHUB_OUTPUT
+            echo "simplify_hsk4=${{ inputs.simplify_hsk4 }}" >> $GITHUB_OUTPUT
 
             # Smart defaults: always enable pinyin + translation + word spacing
             echo "add_pinyin=true" >> $GITHUB_OUTPUT
             echo "add_translation=true" >> $GITHUB_OUTPUT
             echo "word_spacing=true" >> $GITHUB_OUTPUT
 
-            # Map quality choice to internal flags
-            QUALITY="${{ inputs.quality }}"
-            case "$QUALITY" in
-              "premium (Claude Sonnet)")
-                echo "use_claude=true" >> $GITHUB_OUTPUT
-                echo "use_opus=false" >> $GITHUB_OUTPUT
-                echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
-                ;;
-              "simplified (Claude + HSK 4)")
-                echo "use_claude=true" >> $GITHUB_OUTPUT
-                echo "use_opus=false" >> $GITHUB_OUTPUT
-                echo "simplify_hsk4=true" >> $GITHUB_OUTPUT
-                ;;
-              *)
-                echo "use_claude=false" >> $GITHUB_OUTPUT
-                echo "use_opus=false" >> $GITHUB_OUTPUT
-                echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
-                ;;
-            esac
+            # Map tier to LLM model, with optional override
+            TIER="${{ inputs.tier }}"
+            MODEL_OVERRIDE="${{ inputs.model_override }}"
+            if [ -n "$MODEL_OVERRIDE" ]; then
+              echo "llm_model=$MODEL_OVERRIDE" >> $GITHUB_OUTPUT
+            else
+              case "$TIER" in
+                "standard"*)
+                  echo "llm_model=deepseek/deepseek-chat" >> $GITHUB_OUTPUT
+                  ;;
+                "premium"*)
+                  echo "llm_model=anthropic/claude-sonnet-4-5" >> $GITHUB_OUTPUT
+                  ;;
+                *)
+                  echo "llm_model=" >> $GITHUB_OUTPUT
+                  ;;
+              esac
+            fi
 
           elif [ "${{ github.event_name }}" == "repository_dispatch" ]; then
             echo "trigger_type=repository_dispatch" >> $GITHUB_OUTPUT
 
-            # Support full config via client_payload for API consumers
             TRANSLATE_TO="${{ github.event.client_payload.translate_to }}"
             echo "epub_filename=${{ github.event.client_payload.epub_filename }}" >> $GITHUB_OUTPUT
             echo "artifact_name=${{ github.event.client_payload.artifact_name }}" >> $GITHUB_OUTPUT
@@ -150,10 +156,9 @@ jobs:
 
             SIMPLIFY_HSK4="${{ github.event.client_payload.simplify_hsk4 }}"
             echo "simplify_hsk4=${SIMPLIFY_HSK4:-false}" >> $GITHUB_OUTPUT
-            USE_CLAUDE="${{ github.event.client_payload.use_claude }}"
-            echo "use_claude=${USE_CLAUDE:-false}" >> $GITHUB_OUTPUT
-            USE_OPUS="${{ github.event.client_payload.use_opus }}"
-            echo "use_opus=${USE_OPUS:-false}" >> $GITHUB_OUTPUT
+
+            LLM_MODEL="${{ github.event.client_payload.llm_model }}"
+            echo "llm_model=${LLM_MODEL:-}" >> $GITHUB_OUTPUT
 
           elif [ "${{ github.event_name }}" == "push" ]; then
             echo "trigger_type=push" >> $GITHUB_OUTPUT
@@ -172,8 +177,7 @@ jobs:
               echo "add_translation=$(jq -r '.add_translation // true' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
               echo "word_spacing=$(jq -r '.word_spacing // true' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
               echo "simplify_hsk4=$(jq -r '.simplify_hsk4 // false' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
-              echo "use_claude=$(jq -r '.use_claude // false' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
-              echo "use_opus=$(jq -r '.use_opus // false' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
+              echo "llm_model=$(jq -r '.llm_model // ""' ./input-epubs/config.json)" >> $GITHUB_OUTPUT
 
               GENERATE_ANKI=$(jq -r '.generate_anki // false' ./input-epubs/config.json)
               echo "generate_anki=${GENERATE_ANKI}" >> $GITHUB_OUTPUT
@@ -183,13 +187,12 @@ jobs:
               echo "add_translation=true" >> $GITHUB_OUTPUT
               echo "word_spacing=true" >> $GITHUB_OUTPUT
               echo "simplify_hsk4=false" >> $GITHUB_OUTPUT
-              echo "use_claude=false" >> $GITHUB_OUTPUT
-              echo "use_opus=false" >> $GITHUB_OUTPUT
+              echo "llm_model=" >> $GITHUB_OUTPUT
             fi
           fi
 
       - name: Validate OpenRouter API key (if needed)
-        if: steps.params.outputs.simplify_hsk4 == 'true' || steps.params.outputs.use_claude == 'true'
+        if: steps.params.outputs.simplify_hsk4 == 'true' || steps.params.outputs.llm_model != ''
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
@@ -292,8 +295,7 @@ jobs:
           ADD_TRANSLATION="${{ needs.prepare.outputs.add_translation }}"
           WORD_SPACING="${{ needs.prepare.outputs.word_spacing }}"
           SIMPLIFY_HSK4="${{ needs.prepare.outputs.simplify_hsk4 }}"
-          USE_CLAUDE="${{ needs.prepare.outputs.use_claude }}"
-          USE_OPUS="${{ needs.prepare.outputs.use_opus }}"
+          LLM_MODEL="${{ needs.prepare.outputs.llm_model }}"
 
           for INPUT_FILE in ./input/*.epub; do
             [ -f "$INPUT_FILE" ] || continue
@@ -312,8 +314,7 @@ jobs:
             [ "$ADD_PINYIN" == "true" ] && [ "$ADD_TRANSLATION" != "true" ] && CMD="$CMD --pinyin-only"
             [ "$WORD_SPACING" == "true" ] && CMD="$CMD --word-spacing"
             [ "$SIMPLIFY_HSK4" == "true" ] && CMD="$CMD --simplify-hsk4"
-            [ "$USE_CLAUDE" == "true" ] && CMD="$CMD --use-claude"
-            [ "$USE_OPUS" == "true" ] && CMD="$CMD --use-opus"
+            [ -n "$LLM_MODEL" ] && CMD="$CMD --model \"$LLM_MODEL\""
 
             echo "Running: $CMD"
             eval $CMD
@@ -338,13 +339,13 @@ jobs:
           echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Translation | ${{ needs.prepare.outputs.translate_to }} |" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ needs.prepare.outputs.simplify_hsk4 }}" == "true" ]; then
-            echo "| Quality | simplified (Claude + HSK 4) |" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.prepare.outputs.use_claude }}" == "true" ]; then
-            echo "| Quality | premium (Claude Sonnet) |" >> $GITHUB_STEP_SUMMARY
+          LLM_MODEL="${{ needs.prepare.outputs.llm_model }}"
+          if [ -n "$LLM_MODEL" ]; then
+            echo "| Engine | $LLM_MODEL |" >> $GITHUB_STEP_SUMMARY
           else
-            echo "| Quality | standard (Google Translate) |" >> $GITHUB_STEP_SUMMARY
+            echo "| Engine | Google Translate (free) |" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "| HSK 4 Simplify | ${{ needs.prepare.outputs.simplify_hsk4 }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Anki deck | ${{ needs.prepare.outputs.generate_anki }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Audiobook | ${{ needs.prepare.outputs.generate_audio }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -386,8 +387,7 @@ jobs:
         run: |
           mkdir -p ./output
           TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
-          USE_CLAUDE="${{ needs.prepare.outputs.use_claude }}"
-          USE_OPUS="${{ needs.prepare.outputs.use_opus }}"
+          LLM_MODEL="${{ needs.prepare.outputs.llm_model }}"
 
           for INPUT_FILE in ./input/*.epub; do
             [ -f "$INPUT_FILE" ] || continue
@@ -398,8 +398,7 @@ jobs:
             echo "Generating Anki deck: $ANKI_FILE"
 
             CMD="python convert.py \"$INPUT_FILE\" -o \"$ANKI_FILE\" --anki --target \"$TRANSLATE_TO\""
-            [ "$USE_CLAUDE" == "true" ] && CMD="$CMD --use-claude"
-            [ "$USE_OPUS" == "true" ] && CMD="$CMD --use-opus"
+            [ -n "$LLM_MODEL" ] && CMD="$CMD --model \"$LLM_MODEL\""
 
             eval $CMD
           done
@@ -448,8 +447,7 @@ jobs:
         run: |
           mkdir -p ./output
           TRANSLATE_TO="${{ needs.prepare.outputs.translate_to }}"
-          USE_CLAUDE="${{ needs.prepare.outputs.use_claude }}"
-          USE_OPUS="${{ needs.prepare.outputs.use_opus }}"
+          LLM_MODEL="${{ needs.prepare.outputs.llm_model }}"
 
           for INPUT_FILE in ./input/*.epub; do
             [ -f "$INPUT_FILE" ] || continue
@@ -460,8 +458,7 @@ jobs:
             echo "Generating audiobook: $AUDIO_FILE"
 
             CMD="python convert.py \"$INPUT_FILE\" -o \"$AUDIO_FILE\" --audio --target \"$TRANSLATE_TO\""
-            [ "$USE_CLAUDE" == "true" ] && CMD="$CMD --use-claude"
-            [ "$USE_OPUS" == "true" ] && CMD="$CMD --use-opus"
+            [ -n "$LLM_MODEL" ] && CMD="$CMD --model \"$LLM_MODEL\""
 
             eval $CMD
           done

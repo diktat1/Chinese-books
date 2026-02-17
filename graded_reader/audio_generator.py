@@ -355,8 +355,7 @@ def generate_audiobook(
     translation_target: str = 'fr',
     translation_source: str = 'zh-CN',
     bilingual: bool = True,
-    use_claude: bool = False,
-    use_opus: bool = False,
+    llm_model: str | None = None,
 ) -> str:
     """
     Generate an audiobook from a Chinese EPUB.
@@ -370,8 +369,7 @@ def generate_audiobook(
         translation_target: Target language code for bilingual narration.
         translation_source: Source language code.
         bilingual: Narrate in target language then Chinese per paragraph.
-        use_claude: Use Claude for translation instead of Google Translate.
-        use_opus: Use Claude Opus model.
+        llm_model: OpenRouter model ID for LLM translation, or None for Google Translate.
 
     Returns:
         Path to the generated audiobook file.
@@ -393,13 +391,13 @@ def generate_audiobook(
     # Set up translation for bilingual mode
     translate = None
     if bilingual:
-        if use_claude:
-            from .claude_translator import translate_text_claude
+        if llm_model:
+            from .llm_translator import translate_text_llm
 
             def translate(text):
-                return translate_text_claude(
+                return translate_text_llm(
                     text, source=translation_source, target=translation_target,
-                    use_opus=use_opus,
+                    model=llm_model,
                 )
         else:
             from .translator import translate_text

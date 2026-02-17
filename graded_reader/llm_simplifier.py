@@ -1,7 +1,7 @@
 """
 HSK 4 Vocabulary Simplifier using OpenRouter API.
 
-This module uses Claude (via OpenRouter) to simplify Chinese text to HSK 4
+This module uses LLMs (via OpenRouter) to simplify Chinese text to HSK 4
 vocabulary level, replacing advanced words with simpler equivalents that
 HSK 4 learners can understand.
 """
@@ -19,10 +19,6 @@ except ImportError:
     OPENROUTER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
-
-# Default model for simplification (can be overridden)
-DEFAULT_MODEL = "anthropic/claude-sonnet-4"
-OPUS_MODEL = "anthropic/claude-opus-4"
 
 
 def is_openrouter_available() -> bool:
@@ -49,18 +45,18 @@ def _create_client() -> 'OpenAI':
 
 def simplify_to_hsk4(
     text: str,
-    use_opus: bool = False,
+    model: Optional[str] = None,
     max_retries: int = 3,
 ) -> str:
     """
-    Simplify Chinese text to HSK 4 vocabulary level using Claude.
+    Simplify Chinese text to HSK 4 vocabulary level using an LLM.
 
     Replaces advanced vocabulary (HSK 5-6 and beyond) with HSK 4 or simpler
     equivalents while preserving the original meaning as much as possible.
 
     Args:
         text: The Chinese text to simplify.
-        use_opus: If True, use Claude Opus for higher quality (slower, more expensive).
+        model: OpenRouter model ID. Defaults to the premium tier default.
         max_retries: Number of retry attempts on API failure.
 
     Returns:
@@ -80,7 +76,9 @@ def simplify_to_hsk4(
     if not text:
         return ''
 
-    model = OPUS_MODEL if use_opus else DEFAULT_MODEL
+    if model is None:
+        from .models import TIER_DEFAULTS
+        model = TIER_DEFAULTS["premium"]
 
     return _simplify_with_retry(text, model, max_retries)
 
@@ -159,14 +157,14 @@ Remember: Output only the simplified Chinese text, nothing else."""
 
 def analyze_vocabulary_level(
     text: str,
-    use_opus: bool = False,
+    model: Optional[str] = None,
 ) -> dict:
     """
     Analyze a Chinese text and identify words above HSK 4 level.
 
     Args:
         text: The Chinese text to analyze.
-        use_opus: If True, use Claude Opus for more accurate analysis.
+        model: OpenRouter model ID. Defaults to the premium tier default.
 
     Returns:
         A dictionary containing:
@@ -181,8 +179,11 @@ def analyze_vocabulary_level(
     if not api_key:
         return {'error': 'OPENROUTER_API_KEY not set'}
 
+    if model is None:
+        from .models import TIER_DEFAULTS
+        model = TIER_DEFAULTS["premium"]
+
     client = _create_client()
-    model = OPUS_MODEL if use_opus else DEFAULT_MODEL
 
     system_prompt = """You are a Chinese language analysis expert. Analyze the given text and identify vocabulary difficulty.
 

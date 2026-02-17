@@ -2,7 +2,7 @@
 Translation module using OpenRouter API.
 
 Provides high-quality Chinese to English (or other language) translation
-using Claude (via OpenRouter) as an alternative to Google Translate.
+using LLMs (via OpenRouter) as an alternative to Google Translate.
 """
 
 import os
@@ -18,10 +18,6 @@ except ImportError:
     OPENROUTER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
-
-# Default model for translation
-DEFAULT_MODEL = "anthropic/claude-sonnet-4"
-OPUS_MODEL = "anthropic/claude-opus-4"
 
 # Maximum text length per request (characters)
 MAX_CHUNK_SIZE = 4000
@@ -49,24 +45,44 @@ def _create_client() -> 'OpenAI':
     )
 
 
-def translate_text_claude(
+def _normalize_language(lang: str) -> str:
+    """Normalize language codes to human-readable names for LLM prompts."""
+    lang_map = {
+        'zh-cn': 'Chinese (Simplified)',
+        'zh-tw': 'Chinese (Traditional)',
+        'zh': 'Chinese',
+        'en': 'English',
+        'ja': 'Japanese',
+        'ko': 'Korean',
+        'fr': 'French',
+        'de': 'German',
+        'es': 'Spanish',
+        'it': 'Italian',
+        'pt': 'Portuguese',
+        'ru': 'Russian',
+        'ar': 'Arabic',
+        'hi': 'Hindi',
+        'th': 'Thai',
+        'vi': 'Vietnamese',
+    }
+    return lang_map.get(lang.lower(), lang)
+
+
+def translate_text_llm(
     text: str,
     source: str = 'Chinese',
     target: str = 'English',
-    use_opus: bool = False,
+    model: Optional[str] = None,
     max_retries: int = 3,
 ) -> str:
     """
-    Translate text from source to target language using Claude.
-
-    Provides high-quality, context-aware translations that are often
-    more natural and accurate than machine translation services.
+    Translate text from source to target language using an LLM via OpenRouter.
 
     Args:
         text: The text to translate.
         source: Source language name (e.g., 'Chinese', 'zh-CN').
         target: Target language name (e.g., 'English', 'Japanese').
-        use_opus: If True, use Claude Opus for highest quality.
+        model: OpenRouter model ID. Defaults to the standard tier default.
         max_retries: Number of retry attempts on API failure.
 
     Returns:
@@ -90,7 +106,9 @@ def translate_text_claude(
     source = _normalize_language(source)
     target = _normalize_language(target)
 
-    model = OPUS_MODEL if use_opus else DEFAULT_MODEL
+    if model is None:
+        from .models import TIER_DEFAULTS
+        model = TIER_DEFAULTS["standard"]
 
     # Handle long texts by chunking
     if len(text) <= MAX_CHUNK_SIZE:
@@ -108,29 +126,6 @@ def translate_text_claude(
             time.sleep(0.3)
 
     return ' '.join(translated_chunks)
-
-
-def _normalize_language(lang: str) -> str:
-    """Normalize language codes to human-readable names for Claude."""
-    lang_map = {
-        'zh-cn': 'Chinese (Simplified)',
-        'zh-tw': 'Chinese (Traditional)',
-        'zh': 'Chinese',
-        'en': 'English',
-        'ja': 'Japanese',
-        'ko': 'Korean',
-        'fr': 'French',
-        'de': 'German',
-        'es': 'Spanish',
-        'it': 'Italian',
-        'pt': 'Portuguese',
-        'ru': 'Russian',
-        'ar': 'Arabic',
-        'hi': 'Hindi',
-        'th': 'Thai',
-        'vi': 'Vietnamese',
-    }
-    return lang_map.get(lang.lower(), lang)
 
 
 def _translate_with_retry(
@@ -208,11 +203,11 @@ Remember: Output only the {target} translation, nothing else."""
     return text
 
 
-def translate_sentences_claude(
+def translate_sentences_llm(
     sentences: list[str],
     source: str = 'Chinese',
     target: str = 'English',
-    use_opus: bool = False,
+    model: Optional[str] = None,
     max_retries: int = 3,
 ) -> list[str]:
     """
@@ -225,7 +220,7 @@ def translate_sentences_claude(
         sentences: List of Chinese sentences to translate.
         source: Source language name.
         target: Target language name.
-        use_opus: If True, use Claude Opus model.
+        model: OpenRouter model ID. Defaults to the standard tier default.
         max_retries: Number of retry attempts.
 
     Returns:
@@ -235,17 +230,19 @@ def translate_sentences_claude(
         return []
 
     if not OPENROUTER_AVAILABLE or not get_api_key():
-        # Fall back to per-sentence translation
-        return [translate_text_claude(s, source, target, use_opus, max_retries)
+        return [translate_text_llm(s, source, target, model, max_retries)
                 for s in sentences]
 
     # Single sentence — just translate directly
     if len(sentences) == 1:
-        return [translate_text_claude(sentences[0], source, target, use_opus, max_retries)]
+        return [translate_text_llm(sentences[0], source, target, model, max_retries)]
 
     source = _normalize_language(source)
     target = _normalize_language(target)
-    model = OPUS_MODEL if use_opus else DEFAULT_MODEL
+
+    if model is None:
+        from .models import TIER_DEFAULTS
+        model = TIER_DEFAULTS["standard"]
 
     numbered_input = "\n".join(f"{i+1}. {s}" for i, s in enumerate(sentences))
 
@@ -314,7 +311,7 @@ def translate_sentences_claude(
     logger.info("Falling back to per-sentence translation")
     results = []
     for s in sentences:
-        results.append(translate_text_claude(s, source, target, use_opus, max_retries))
+        results.append(translate_text_llm(s, source, target, model, max_retries))
         time.sleep(0.3)
     return results
 
