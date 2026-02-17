@@ -4,61 +4,58 @@ Chinese Graded Reader Converter
 
 Converts a Chinese EPUB ebook into a graded reader with:
   - Pinyin annotations above each Chinese character (using <ruby> tags)
-  - English translations after each paragraph
+  - Translations after each paragraph (Google Translate or OpenRouter LLM)
 
 Usage:
     python convert.py input.epub
     python convert.py input.epub -o output.epub
     python convert.py input.epub --pinyin-only
-    python convert.py input.epub --translation-only
+    python convert.py input.epub --tier standard
+    python convert.py input.epub --model deepseek/deepseek-chat
+    python convert.py input.epub --list-models
 """
 
 import argparse
 import logging
-import subprocess
 import sys
 from pathlib import Path
 
 from graded_reader.epub_processor import process_epub
-from graded_reader.calibre import (
-    is_calibre_installed,
-    convert_epub_to_azw3,
-    CalibreNotFoundError,
-)
-from graded_reader.claude_simplifier import is_openrouter_available, get_api_key
+from graded_reader.llm_simplifier import is_openrouter_available, get_api_key
+from graded_reader.models import MODELS, TIER_DEFAULTS, format_model_table
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert a Chinese EPUB into a graded reader with pinyin and English translations.',
+        description='Convert a Chinese EPUB into a graded reader with pinyin and translations.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python convert.py book.epub                          # Full conversion (pinyin + translation)
-  python convert.py book.epub -o my_reader.epub        # Specify output filename
-  python convert.py book.epub --pinyin-only            # Only add pinyin, no translation
-  python convert.py book.epub --translation-only       # Only add translation, no pinyin
-  python convert.py book.epub --target ja              # Translate to Japanese instead of English
-  python convert.py book.epub --word-spacing           # Add spaces between words for Kindle lookup
-  python convert.py book.epub --kindle                 # Output AZW3 for Kindle (requires Calibre)
-  python convert.py book.epub --kindle --no-keep-epub  # AZW3 only, delete intermediate EPUB
-  python convert.py book.epub --parallel-text           # Side-by-side Chinese + translation columns
-  python convert.py book.epub --simplify-hsk4          # Simplify to HSK 4 vocabulary (requires Claude)
-  python convert.py book.epub --use-claude             # Use Claude for translation (higher quality)
-  python convert.py book.epub --simplify-hsk4 --use-opus  # Use Opus model for best quality
-  python convert.py book.epub --anki                      # Generate Anki deck (sentence cards)
+  python convert.py book.epub                              # Pinyin + Google Translate (free)
+  python convert.py book.epub -o my_reader.epub            # Specify output filename
+  python convert.py book.epub --pinyin-only                # Only add pinyin, no translation
+  python convert.py book.epub --translation-only           # Only add translation, no pinyin
+  python convert.py book.epub --target ja                  # Translate to Japanese
+  python convert.py book.epub --word-spacing               # Kindle dictionary lookup support
+  python convert.py book.epub --parallel-text              # Side-by-side Chinese + translation
+  python convert.py book.epub --tier standard              # Use DeepSeek V3 (~$0.10/book)
+  python convert.py book.epub --tier premium               # Use Claude Sonnet 4.5 (~$1.65/book)
+  python convert.py book.epub --model deepseek/deepseek-chat  # Specific model
+  python convert.py book.epub --simplify-hsk4              # Simplify to HSK 4 vocabulary
+  python convert.py book.epub --anki                       # Anki flashcard deck
   python convert.py book.epub --anki --target fr           # Anki deck with French translations
   python convert.py book.epub --anki --no-audio            # Anki deck without TTS audio
   python convert.py book.epub --anki --max-sentences 100   # Limit to first 100 sentences
   python convert.py book.epub --audio --target fr          # Bilingual audiobook (French + Chinese)
   python convert.py book.epub --audio --no-bilingual       # Chinese-only audiobook
+  python convert.py --list-models                          # Show available models and pricing
         ''',
     )
 
-    parser.add_argument('input', help='Path to the input Chinese EPUB file')
+    parser.add_argument('input', nargs='?', help='Path to the input Chinese EPUB file')
     parser.add_argument(
         '-o', '--output',
-        help='Path for the output EPUB file (default: <input>_graded.epub)',
+        help='Path for the output file (default: <input>_graded.epub)',
     )
     parser.add_argument(
         '--pinyin-only',
@@ -89,51 +86,43 @@ Examples:
         '--parallel-text',
         action='store_true',
         help='Two-column layout: Chinese sentences on the left, translations on '
-             'the right, aligned row-by-row. Uses table layout for maximum '
-             'e-reader compatibility. Requires translation to be enabled.',
+             'the right, aligned row-by-row.',
     )
-    parser.add_argument(
-        '--kindle', '--azw3',
+
+    # Model selection
+    model_group = parser.add_argument_group('translation engine')
+    model_group.add_argument(
+        '--tier',
+        choices=['free', 'standard', 'premium'],
+        help='Translation quality tier. '
+             'free=Google Translate (no API key), '
+             'standard=DeepSeek V3 (~$0.10/book), '
+             'premium=Claude Sonnet 4.5 (~$1.65/book)',
+    )
+    model_group.add_argument(
+        '--model',
+        help='OpenRouter model ID (e.g., deepseek/deepseek-chat). '
+             'Overrides --tier. Requires OPENROUTER_API_KEY.',
+    )
+    model_group.add_argument(
+        '--list-models',
         action='store_true',
-        dest='kindle',
-        help='Convert output to AZW3 format for Kindle (requires Calibre)',
+        help='Show available models with pricing and exit',
     )
-    parser.add_argument(
-        '--kindle-profile',
-        default='kindle_pw3',
-        choices=['kindle', 'kindle_dx', 'kindle_fire', 'kindle_oasis',
-                 'kindle_pw', 'kindle_pw3', 'kindle_scribe', 'kindle_voyage'],
-        help='Calibre output profile for Kindle conversion (default: kindle_pw3)',
-    )
-    parser.add_argument(
-        '--no-keep-epub',
-        action='store_true',
-        help='Delete the intermediate EPUB after AZW3 conversion',
-    )
+
+    # HSK simplification
     parser.add_argument(
         '--simplify-hsk4',
         action='store_true',
-        help='Simplify Chinese vocabulary to HSK 4 level using Claude AI. '
+        help='Simplify Chinese vocabulary to HSK 4 level using an LLM. '
              'Requires OPENROUTER_API_KEY environment variable.',
     )
-    parser.add_argument(
-        '--use-claude',
-        action='store_true',
-        help='Use Claude AI for translation instead of Google Translate. '
-             'Provides higher quality translations. Requires OPENROUTER_API_KEY.',
-    )
-    parser.add_argument(
-        '--use-opus',
-        action='store_true',
-        help='Use Claude Opus model for highest quality (slower, more expensive). '
-             'Applies to both HSK simplification and Claude translation.',
-    )
+
     # Anki deck generation
     parser.add_argument(
         '--anki',
         action='store_true',
-        help='Generate an Anki deck (.apkg) with sentence cards. '
-             'Front: Chinese + audio. Back: pinyin + translation.',
+        help='Generate an Anki deck (.apkg) with sentence cards.',
     )
     parser.add_argument(
         '--no-audio',
@@ -151,8 +140,7 @@ Examples:
     parser.add_argument(
         '--audio',
         action='store_true',
-        help='Generate audiobook (ZIP of chapter MP3s) using edge-tts. '
-             'Free neural voices, no API key required.',
+        help='Generate audiobook using edge-tts. No API key required for TTS.',
     )
     parser.add_argument(
         '--no-bilingual',
@@ -167,6 +155,15 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Handle --list-models
+    if args.list_models:
+        print(format_model_table())
+        return
+
+    # Input is required for all other operations
+    if not args.input:
+        parser.error('the following arguments are required: input')
 
     # Set up logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -185,14 +182,20 @@ Examples:
     if input_path.suffix.lower() != '.epub':
         print(f'Warning: Input file does not have .epub extension: {input_path}', file=sys.stderr)
 
-    # Check Calibre availability if --kindle is requested
-    if args.kindle and not is_calibre_installed():
-        error = CalibreNotFoundError()
-        print(f'Error: {error.message}', file=sys.stderr)
-        sys.exit(1)
+    # Resolve LLM model from --model or --tier
+    llm_model = None
+    if args.model:
+        llm_model = args.model
+    elif args.tier and args.tier != 'free':
+        llm_model = TIER_DEFAULTS.get(args.tier)
+    # No --model and no --tier (or --tier free) => Google Translate (llm_model=None)
 
-    # Check Anthropic availability if Claude features are requested
-    if args.simplify_hsk4 or args.use_claude:
+    # HSK simplification always needs an LLM
+    if args.simplify_hsk4 and not llm_model:
+        llm_model = TIER_DEFAULTS["premium"]
+
+    # Validate OpenRouter availability if LLM is needed
+    if llm_model:
         if not is_openrouter_available():
             print('Error: OpenAI SDK not installed. Install with: pip install openai', file=sys.stderr)
             sys.exit(1)
@@ -201,7 +204,7 @@ Examples:
             print('Get your API key from https://openrouter.ai/', file=sys.stderr)
             sys.exit(1)
 
-    # Anki deck mode - separate flow
+    # Anki deck mode
     if args.anki:
         from graded_reader.anki_generator import generate_anki_deck
 
@@ -212,9 +215,11 @@ Examples:
         else:
             anki_output = input_path.with_stem(input_path.stem + '_anki').with_suffix('.apkg')
 
+        model_name = MODELS[llm_model]["name"] if llm_model and llm_model in MODELS else (llm_model or "Google Translate")
         print(f'Input:  {input_path}')
         print(f'Output: {anki_output}')
         print(f'Mode:   Anki deck ({args.source} -> {args.target})')
+        print(f'Engine: {model_name}')
         if not args.no_audio:
             print(f'Audio:  TTS enabled (Chinese)')
         if args.max_sentences:
@@ -226,15 +231,14 @@ Examples:
             output_path=str(anki_output),
             translation_target=args.target,
             translation_source=args.source,
-            use_claude=args.use_claude,
-            use_opus=args.use_opus,
+            llm_model=llm_model,
             include_audio=not args.no_audio,
             max_sentences=args.max_sentences,
         )
         print(f'\nAnki deck written to: {anki_output}')
         return
 
-    # Audiobook mode - separate flow
+    # Audiobook mode
     if args.audio:
         from graded_reader.audio_generator import generate_audiobook
 
@@ -245,9 +249,11 @@ Examples:
 
         bilingual = not args.no_bilingual
 
+        model_name = MODELS[llm_model]["name"] if llm_model and llm_model in MODELS else (llm_model or "Google Translate")
         print(f'Input:  {input_path}')
         print(f'Output: {audio_output} (format auto-detected)')
         print(f'Mode:   Audiobook')
+        print(f'Engine: {model_name}')
         if bilingual:
             print(f'Audio:  Bilingual ({args.target} + {args.source})')
         else:
@@ -260,28 +266,16 @@ Examples:
             translation_target=args.target,
             translation_source=args.source,
             bilingual=bilingual,
-            use_claude=args.use_claude,
-            use_opus=args.use_opus,
+            llm_model=llm_model,
         )
         print(f'\nAudiobook written to: {result}')
         return
 
-    # Determine output paths
-    if args.kindle:
-        # For AZW3 output, we need both an intermediate EPUB and final AZW3 path
-        if args.output:
-            azw3_path = Path(args.output)
-            if azw3_path.suffix.lower() != '.azw3':
-                azw3_path = azw3_path.with_suffix('.azw3')
-        else:
-            azw3_path = input_path.with_stem(input_path.stem + '_graded').with_suffix('.azw3')
-        epub_output_path = azw3_path.with_suffix('.epub')
-        output_path = epub_output_path  # process_epub writes to this
+    # EPUB graded reader mode
+    if args.output:
+        output_path = Path(args.output)
     else:
-        if args.output:
-            output_path = Path(args.output)
-        else:
-            output_path = input_path.with_stem(input_path.stem + '_graded')
+        output_path = input_path.with_stem(input_path.stem + '_graded')
 
     # Determine what to add
     add_pinyin = not args.translation_only
@@ -291,35 +285,29 @@ Examples:
         print('Error: Cannot use --pinyin-only and --translation-only together', file=sys.stderr)
         sys.exit(1)
 
-    mode_parts = []
-    if args.simplify_hsk4:
-        model_note = ' (Opus)' if args.use_opus else ''
-        mode_parts.append(f'HSK4-simplify{model_note}')
-    if add_pinyin:
-        mode_parts.append('pinyin')
-    if add_translation:
-        translator = 'Claude' if args.use_claude else 'Google'
-        model_note = ' Opus' if args.use_claude and args.use_opus else ''
-        mode_parts.append(f'translation ({args.source} -> {args.target}, {translator}{model_note})')
-    if args.word_spacing:
-        mode_parts.append('word-spacing')
-    if args.parallel_text:
-        mode_parts.append('parallel-text (side-by-side)')
-    if args.kindle:
-        mode_parts.append(f'kindle ({args.kindle_profile})')
-
-    print(f'Input:  {input_path}')
-    if args.kindle:
-        print(f'Output: {azw3_path} (AZW3 for Kindle)')
-    else:
-        print(f'Output: {output_path}')
-    print(f'Mode:   {" + ".join(mode_parts)}')
-    print()
-
     # Validate flag combinations
     if args.parallel_text and args.pinyin_only:
         print('Error: --parallel-text requires translation. Cannot use with --pinyin-only.', file=sys.stderr)
         sys.exit(1)
+
+    model_name = MODELS[llm_model]["name"] if llm_model and llm_model in MODELS else (llm_model or "Google Translate")
+    mode_parts = []
+    if args.simplify_hsk4:
+        mode_parts.append('HSK4-simplify')
+    if add_pinyin:
+        mode_parts.append('pinyin')
+    if add_translation:
+        mode_parts.append(f'translation ({args.source} -> {args.target})')
+    if args.word_spacing:
+        mode_parts.append('word-spacing')
+    if args.parallel_text:
+        mode_parts.append('parallel-text')
+
+    print(f'Input:  {input_path}')
+    print(f'Output: {output_path}')
+    print(f'Engine: {model_name}')
+    print(f'Mode:   {" + ".join(mode_parts)}')
+    print()
 
     process_epub(
         input_path=str(input_path),
@@ -331,29 +319,10 @@ Examples:
         word_spacing=args.word_spacing,
         parallel_text=args.parallel_text,
         simplify_hsk4=args.simplify_hsk4,
-        use_claude_translator=args.use_claude,
-        use_opus=args.use_opus,
+        llm_model=llm_model,
     )
 
-    if args.kindle:
-        # Convert EPUB to AZW3
-        keep_epub = not args.no_keep_epub
-        try:
-            convert_epub_to_azw3(
-                epub_path=str(epub_output_path),
-                azw3_path=str(azw3_path),
-                output_profile=args.kindle_profile,
-                keep_epub=keep_epub,
-            )
-            print(f'\nKindle AZW3 written to: {azw3_path}')
-            if keep_epub:
-                print(f'Intermediate EPUB kept at: {epub_output_path}')
-        except subprocess.CalledProcessError as e:
-            print(f'Error: Calibre conversion failed: {e.stderr}', file=sys.stderr)
-            sys.exit(1)
-    else:
-        print(f'\nOutput written to: {output_path}')
-        print('Tip: Use --kindle flag to automatically convert to AZW3 for Kindle.')
+    print(f'\nOutput written to: {output_path}')
 
 
 if __name__ == '__main__':

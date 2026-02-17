@@ -105,8 +105,7 @@ def generate_anki_deck(
     output_path: str,
     translation_target: str = 'fr',
     translation_source: str = 'zh-CN',
-    use_claude: bool = False,
-    use_opus: bool = False,
+    llm_model: str | None = None,
     include_audio: bool = True,
     max_sentences: int = 0,
 ) -> str:
@@ -118,8 +117,7 @@ def generate_anki_deck(
         output_path: Path for the output .apkg file.
         translation_target: Target language code (default: 'fr' for French).
         translation_source: Source language code (default: 'zh-CN').
-        use_claude: Use Claude for translation instead of Google Translate.
-        use_opus: Use Claude Opus model.
+        llm_model: OpenRouter model ID for LLM translation, or None for Google Translate.
         include_audio: Generate TTS audio for each sentence.
         max_sentences: Maximum number of sentences (0 = all).
 
@@ -141,12 +139,12 @@ def generate_anki_deck(
         raise ValueError('No Chinese sentences found in the EPUB')
 
     # Set up translation function
-    if use_claude:
-        from .claude_translator import translate_text_claude
+    if llm_model:
+        from .llm_translator import translate_text_llm
         def translate(text):
-            return translate_text_claude(
+            return translate_text_llm(
                 text, source=translation_source, target=translation_target,
-                use_opus=use_opus,
+                model=llm_model,
             )
     else:
         from .translator import translate_text

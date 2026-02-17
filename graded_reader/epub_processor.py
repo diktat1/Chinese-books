@@ -21,8 +21,8 @@ from .chinese_processing import (
     text_to_pinyin,
 )
 from .translator import translate_text, translate_sentences
-from .claude_simplifier import simplify_to_hsk4, is_openrouter_available as is_simplifier_available
-from .claude_translator import translate_text_claude, translate_sentences_claude
+from .llm_simplifier import simplify_to_hsk4, is_openrouter_available as is_simplifier_available
+from .llm_translator import translate_text_llm, translate_sentences_llm
 
 logger = logging.getLogger(__name__)
 
@@ -189,8 +189,7 @@ def process_epub(
     word_spacing: bool = False,
     parallel_text: bool = False,
     simplify_hsk4: bool = False,
-    use_claude_translator: bool = False,
-    use_opus: bool = False,
+    llm_model: str | None = None,
     progress_callback=None,
 ) -> None:
     """
@@ -207,9 +206,9 @@ def process_epub(
         word_spacing: Whether to add spaces between Chinese words for dictionary lookup.
         parallel_text: If True, use two-column table layout with Chinese sentences
                        on the left and translations on the right, aligned row-by-row.
-        simplify_hsk4: If True, simplify Chinese vocabulary to HSK 4 level using Claude.
-        use_claude_translator: If True, use Claude for translation instead of Google Translate.
-        use_opus: If True, use Claude Opus model for higher quality (slower, more expensive).
+        simplify_hsk4: If True, simplify Chinese vocabulary to HSK 4 level.
+        llm_model: OpenRouter model ID for LLM translation/simplification,
+                   or None to use Google Translate (free).
     """
     logger.info(f'Reading EPUB: {input_path}')
     book = epub.read_epub(input_path, options={'ignore_ncx': True})
@@ -248,8 +247,7 @@ def process_epub(
             word_spacing=word_spacing,
             parallel_text=parallel_text,
             simplify_hsk4=simplify_hsk4,
-            use_claude_translator=use_claude_translator,
-            use_opus=use_opus,
+            llm_model=llm_model,
         )
         item.set_content(processed.encode('utf-8'))
 
@@ -402,8 +400,7 @@ def _process_html_content(
     word_spacing: bool = False,
     parallel_text: bool = False,
     simplify_hsk4: bool = False,
-    use_claude_translator: bool = False,
-    use_opus: bool = False,
+    llm_model: str | None = None,
 ) -> str:
     """
     Process a single HTML document: annotate Chinese text nodes with
@@ -413,7 +410,7 @@ def _process_html_content(
     sentences on the left and translations on the right.
 
     If simplify_hsk4 is True, simplifies vocabulary to HSK 4 level before processing.
-    If use_claude_translator is True, uses Claude instead of Google Translate.
+    If llm_model is set, uses that OpenRouter model instead of Google Translate.
     """
     soup = BeautifulSoup(html, 'lxml')
 
@@ -455,7 +452,7 @@ def _process_html_content(
 
         # Apply HSK 4 simplification if enabled
         if simplify_hsk4:
-            simplified_text = simplify_to_hsk4(plain_text, use_opus=use_opus)
+            simplified_text = simplify_to_hsk4(plain_text, model=llm_model)
             if simplified_text and not simplified_text.startswith('['):
                 # Update the block content with simplified text
                 block.clear()
@@ -469,8 +466,7 @@ def _process_html_content(
                 add_pinyin=add_pinyin,
                 translation_source=translation_source,
                 translation_target=translation_target,
-                use_claude_translator=use_claude_translator,
-                use_opus=use_opus,
+                llm_model=llm_model,
                 word_spacing=word_spacing,
             )
         else:
@@ -483,8 +479,7 @@ def _process_html_content(
                     block, soup, plain_text,
                     translation_source=translation_source,
                     translation_target=translation_target,
-                    use_claude_translator=use_claude_translator,
-                    use_opus=use_opus,
+                    llm_model=llm_model,
                 )
 
     # Return as string, preserving the XML declaration if present
@@ -529,14 +524,13 @@ def _get_translation(
     plain_text: str,
     translation_source: str,
     translation_target: str,
-    use_claude_translator: bool,
-    use_opus: bool,
+    llm_model: str | None,
 ) -> str | None:
     """Get translation for text, returning None on failure."""
-    if use_claude_translator:
-        translation = translate_text_claude(
+    if llm_model:
+        translation = translate_text_llm(
             plain_text, source=translation_source, target=translation_target,
-            use_opus=use_opus
+            model=llm_model
         )
     else:
         translation = translate_text(
@@ -553,8 +547,7 @@ def _add_translation_to_block(
     plain_text: str,
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
-    use_claude_translator: bool = False,
-    use_opus: bool = False,
+    llm_model: str | None = None,
 ) -> None:
     """
     Add translation to any block element type.
@@ -567,7 +560,7 @@ def _add_translation_to_block(
     """
     translation = _get_translation(
         plain_text, translation_source, translation_target,
-        use_claude_translator, use_opus,
+        llm_model,
     )
     if not translation:
         return
@@ -591,8 +584,7 @@ def _get_parallel_translations(
     plain_text: str,
     translation_source: str,
     translation_target: str,
-    use_claude_translator: bool,
-    use_opus: bool,
+    llm_model: str | None,
 ) -> list[tuple[str, str]]:
     """
     Split Chinese text into sentences and get aligned translations.
@@ -609,18 +601,18 @@ def _get_parallel_translations(
     if len(sentences) == 1:
         translation = _get_translation(
             sentences[0], translation_source, translation_target,
-            use_claude_translator, use_opus,
+            llm_model,
         )
         return [(sentences[0], translation or '')]
 
     # Batch translate
     try:
-        if use_claude_translator:
-            translations = translate_sentences_claude(
+        if llm_model:
+            translations = translate_sentences_llm(
                 sentences,
                 source=translation_source,
                 target=translation_target,
-                use_opus=use_opus,
+                model=llm_model,
             )
         else:
             translations = translate_sentences(
@@ -632,7 +624,7 @@ def _get_parallel_translations(
         logger.warning(f"Batch sentence translation failed: {e}. Falling back to paragraph.")
         translation = _get_translation(
             plain_text, translation_source, translation_target,
-            use_claude_translator, use_opus,
+            llm_model,
         )
         return [(plain_text.strip(), translation or '')]
 
@@ -654,8 +646,7 @@ def _process_block_parallel_text(
     add_pinyin: bool = True,
     translation_source: str = 'zh-CN',
     translation_target: str = 'en',
-    use_claude_translator: bool = False,
-    use_opus: bool = False,
+    llm_model: str | None = None,
     word_spacing: bool = False,
 ) -> None:
     """
@@ -669,7 +660,7 @@ def _process_block_parallel_text(
     """
     sentence_pairs = _get_parallel_translations(
         plain_text, translation_source, translation_target,
-        use_claude_translator, use_opus,
+        llm_model,
     )
 
     # For table cells, fall back to standard stacked layout

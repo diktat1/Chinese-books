@@ -13,6 +13,7 @@ Run with:
 Then open http://localhost:5000 in your browser.
 """
 
+import json
 import os
 import tempfile
 import logging
@@ -24,7 +25,8 @@ from pathlib import Path
 from flask import Flask, request, send_file, render_template_string, jsonify, Response
 
 from graded_reader.epub_processor import process_epub
-from graded_reader.claude_simplifier import is_openrouter_available, get_api_key
+from graded_reader.llm_simplifier import is_openrouter_available, get_api_key
+from graded_reader.models import MODELS, TIER_DEFAULTS, estimate_book_cost
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -51,7 +53,7 @@ HTML_PAGE = '''
             padding: 20px;
         }
         .page {
-            max-width: 520px;
+            max-width: 560px;
             margin: 0 auto;
         }
         h1 { font-size: 1.4em; margin-bottom: 4px; }
@@ -94,6 +96,59 @@ HTML_PAGE = '''
             display: none;
         }
         .output-btn.selected .check { display: block; }
+        /* Tier buttons */
+        .tier-group { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+        .tier-btn {
+            flex: 1; min-width: 130px; padding: 12px 8px; border: 2px solid #e0e0e0;
+            border-radius: 10px; background: #fff; cursor: pointer; text-align: center;
+            transition: all .15s;
+        }
+        .tier-btn:hover { border-color: #ccc; }
+        .tier-btn.selected { border-color: #e74c3c; background: #fef5f5; }
+        .tier-btn.disabled { opacity: 0.45; cursor: not-allowed; }
+        .tier-btn .tier-name { font-weight: 700; font-size: .95em; display: block; }
+        .tier-btn .tier-model { font-size: .75em; color: #888; display: block; margin-top: 2px; }
+        .tier-btn .tier-cost { font-size: .72em; color: #aaa; display: block; margin-top: 1px; }
+        /* Model picker */
+        .model-toggle {
+            font-size: .85em; color: #888; cursor: pointer; padding: 6px 0;
+            user-select: none;
+        }
+        .model-toggle:hover { color: #e74c3c; }
+        .model-picker {
+            display: none; margin-top: 8px; border: 1px solid #eee;
+            border-radius: 8px; padding: 12px; background: #fafafa;
+        }
+        .model-picker.open { display: block; }
+        .model-tier-label {
+            font-size: .75em; font-weight: 700; color: #aaa; text-transform: uppercase;
+            letter-spacing: .5px; margin-top: 10px; margin-bottom: 4px;
+            padding-bottom: 3px; border-bottom: 1px solid #eee;
+        }
+        .model-tier-label:first-child { margin-top: 0; }
+        .model-option {
+            display: flex; align-items: flex-start; gap: 8px; padding: 6px 4px;
+            cursor: pointer; border-radius: 6px; transition: background .1s;
+        }
+        .model-option:hover { background: #f0f0f0; }
+        .model-option.selected { background: #fef5f5; }
+        .model-option input[type="radio"] { margin-top: 3px; }
+        .model-info { flex: 1; }
+        .model-name { font-size: .88em; font-weight: 600; }
+        .model-desc { font-size: .75em; color: #888; }
+        .model-meta { font-size: .72em; color: #aaa; }
+        .model-meta .quality-badge {
+            display: inline-block; padding: 1px 6px; border-radius: 3px;
+            font-size: .9em; font-weight: 600;
+        }
+        .quality-badge.excellent { background: #d4edda; color: #155724; }
+        .quality-badge.very_good { background: #fff3cd; color: #856404; }
+        .quality-badge.good { background: #e2e3e5; color: #383d41; }
+        .custom-model-input {
+            width: 100%; padding: 6px 10px; border: 1px solid #ddd;
+            border-radius: 6px; font-size: .85em; margin-top: 8px;
+        }
+        .custom-model-label { font-size: .78em; color: #999; margin-top: 10px; }
         /* Options grid */
         .opt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
         .opt-grid label { font-size: .9em; padding: 4px 0; cursor: pointer; }
@@ -176,30 +231,46 @@ HTML_PAGE = '''
     </div>
 </div>
 
+<div class="card" id="engineCard">
+    <div class="section-title">Translation Engine</div>
+    <div class="tier-group" id="tierGroup">
+        <div class="tier-btn selected" data-tier="google">
+            <span class="tier-name">Free</span>
+            <span class="tier-model">Google Translate</span>
+            <span class="tier-cost">No API key needed</span>
+        </div>
+        <div class="tier-btn" data-tier="standard">
+            <span class="tier-name">Standard</span>
+            <span class="tier-model">DeepSeek V3</span>
+            <span class="tier-cost">~$0.10/book</span>
+        </div>
+        <div class="tier-btn" data-tier="premium">
+            <span class="tier-name">Premium</span>
+            <span class="tier-model">Claude Sonnet 4.5</span>
+            <span class="tier-cost">~$1.65/book</span>
+        </div>
+    </div>
+
+    <div class="model-toggle" id="modelToggle">&#9654; Choose a specific model</div>
+    <div class="model-picker" id="modelPicker">
+        <!-- Populated by JS from /models endpoint -->
+    </div>
+</div>
+
 <div class="card" id="optionsCard">
     <div class="section-title">Options</div>
-    <div class="opt-grid">
-        <div>
-            <label>Target language</label>
-            <select id="optTarget">
-                <option value="fr">French</option>
-                <option value="en" selected>English</option>
-                <option value="ja">Japanese</option>
-                <option value="ko">Korean</option>
-                <option value="de">German</option>
-                <option value="es">Spanish</option>
-                <option value="it">Italian</option>
-                <option value="pt">Portuguese</option>
-            </select>
-        </div>
-        <div>
-            <label>Quality</label>
-            <select id="optQuality">
-                <option value="standard">Standard (Google)</option>
-                <option value="claude">Premium (Claude)</option>
-                <option value="simplified">Simplified (HSK 4)</option>
-            </select>
-        </div>
+    <div style="margin-bottom:10px">
+        <label>Target language</label>
+        <select id="optTarget">
+            <option value="fr">French</option>
+            <option value="en" selected>English</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+            <option value="de">German</option>
+            <option value="es">Spanish</option>
+            <option value="it">Italian</option>
+            <option value="pt">Portuguese</option>
+        </select>
     </div>
     <hr>
     <div class="opt-grid" id="epubOptions">
@@ -207,6 +278,9 @@ HTML_PAGE = '''
         <label><input type="checkbox" id="optTranslation" checked> Translation</label>
         <label><input type="checkbox" id="optWordSpacing"> Word spacing</label>
         <label><input type="checkbox" id="optParallelText"> Parallel text</label>
+    </div>
+    <div class="opt-grid" id="hskOptions">
+        <label><input type="checkbox" id="optSimplifyHsk4"> Simplify to HSK 4</label>
     </div>
     <div class="opt-grid" id="audioOptions" style="display:none">
         <label><input type="checkbox" id="optBilingual" checked> Bilingual narration</label>
@@ -228,6 +302,12 @@ HTML_PAGE = '''
 
 <script>
 const $ = id => document.getElementById(id);
+
+// --- Model data (loaded from server) ---
+let modelCatalog = {};
+let hasApiKey = false;
+let selectedTier = 'google';
+let selectedModel = '';  // empty = Google Translate, else OpenRouter model ID
 
 // --- Output selection ---
 const selected = new Set(['epub']);
@@ -274,15 +354,158 @@ function pickFile() {
     }
 }
 
-// --- Check Claude availability (disable premium options if unavailable) ---
+// --- Tier selection ---
+document.querySelectorAll('.tier-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        if (btn.classList.contains('disabled')) return;
+        document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        selectedTier = btn.dataset.tier;
+
+        // Update selected model
+        if (selectedTier === 'google') {
+            selectedModel = '';
+        } else {
+            const tierDefaults = { standard: 'deepseek/deepseek-chat', premium: 'anthropic/claude-sonnet-4-5' };
+            selectedModel = tierDefaults[selectedTier] || '';
+        }
+
+        // Update radio in model picker
+        updateModelPickerSelection();
+    });
+});
+
+// --- Model picker toggle ---
+$('modelToggle').addEventListener('click', () => {
+    const picker = $('modelPicker');
+    const isOpen = picker.classList.toggle('open');
+    $('modelToggle').innerHTML = (isOpen ? '&#9660;' : '&#9654;') + ' Choose a specific model';
+});
+
+function updateModelPickerSelection() {
+    document.querySelectorAll('.model-option input[type="radio"]').forEach(r => {
+        r.checked = (r.value === selectedModel);
+        r.closest('.model-option').classList.toggle('selected', r.checked);
+    });
+}
+
+function buildModelPicker(models) {
+    const picker = $('modelPicker');
+    picker.innerHTML = '';
+    const tiers = ['free', 'standard', 'premium'];
+    const tierLabels = { free: 'Free (OpenRouter)', standard: 'Standard', premium: 'Premium' };
+
+    tiers.forEach(tier => {
+        const tierModels = Object.entries(models).filter(([_, m]) => m.tier === tier);
+        if (!tierModels.length) return;
+
+        const label = document.createElement('div');
+        label.className = 'model-tier-label';
+        label.textContent = tierLabels[tier];
+        picker.appendChild(label);
+
+        tierModels.forEach(([id, m]) => {
+            const opt = document.createElement('div');
+            opt.className = 'model-option';
+            const qualityClass = m.chinese_quality.replace(' ', '_');
+            const cost = m.input_price === 0 ? '$0.00' : '~$' + estimateCost(m);
+            const note = m.note ? ' ' + m.note : '';
+            opt.innerHTML = `
+                <input type="radio" name="llm_model" value="${id}">
+                <div class="model-info">
+                    <div class="model-name">${m.name} <span style="color:#aaa;font-weight:400;font-size:.8em">${m.provider}</span></div>
+                    <div class="model-desc">${m.description}${note}</div>
+                    <div class="model-meta">
+                        <span class="quality-badge ${qualityClass}">${m.chinese_quality.replace('_', ' ')}</span>
+                        ${cost}/book &middot; ${(m.context_window/1000).toFixed(0)}K context
+                    </div>
+                </div>
+            `;
+            opt.addEventListener('click', () => {
+                selectedModel = id;
+                selectedTier = m.tier === 'free' ? 'free' : m.tier;
+                // Update tier buttons
+                document.querySelectorAll('.tier-btn').forEach(b => {
+                    const t = b.dataset.tier;
+                    b.classList.toggle('selected',
+                        (t === 'google' && !selectedModel) ||
+                        (t === selectedTier && selectedModel));
+                });
+                // Deselect Google if we picked a model
+                if (selectedModel) {
+                    document.querySelector('.tier-btn[data-tier="google"]').classList.remove('selected');
+                    // Select the matching tier
+                    const tierBtn = document.querySelector(`.tier-btn[data-tier="${selectedTier}"]`);
+                    if (tierBtn) tierBtn.classList.add('selected');
+                }
+                updateModelPickerSelection();
+            });
+            picker.appendChild(opt);
+        });
+    });
+
+    // Custom model input
+    const customLabel = document.createElement('div');
+    customLabel.className = 'custom-model-label';
+    customLabel.textContent = 'Or enter any OpenRouter model ID:';
+    picker.appendChild(customLabel);
+
+    const customInput = document.createElement('input');
+    customInput.className = 'custom-model-input';
+    customInput.type = 'text';
+    customInput.placeholder = 'e.g. mistralai/mistral-nemo';
+    customInput.addEventListener('input', () => {
+        const val = customInput.value.trim();
+        if (val) {
+            selectedModel = val;
+            selectedTier = 'custom';
+            document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('selected'));
+            updateModelPickerSelection();
+        }
+    });
+    picker.appendChild(customInput);
+
+    updateModelPickerSelection();
+}
+
+function estimateCost(m) {
+    const inCost = m.input_price * 50000 / 1000000;
+    const outCost = m.output_price * 100000 / 1000000;
+    return (inCost + outCost).toFixed(2);
+}
+
+// --- Check deps and load models ---
 fetch('/check-deps').then(r => r.json()).then(d => {
-    if (!d.claude) {
-        const q = $('optQuality');
-        q.querySelectorAll('option').forEach(o => {
-            if (o.value !== 'standard') o.disabled = true;
+    hasApiKey = d.openrouter;
+    if (!hasApiKey) {
+        document.querySelectorAll('.tier-btn').forEach(btn => {
+            if (btn.dataset.tier !== 'google') {
+                btn.classList.add('disabled');
+                btn.querySelector('.tier-cost').textContent = 'Needs OPENROUTER_API_KEY';
+            }
         });
     }
 }).catch(() => {});
+
+fetch('/models').then(r => r.json()).then(models => {
+    modelCatalog = models;
+    buildModelPicker(models);
+}).catch(() => {});
+
+// --- HSK simplification requires an LLM ---
+$('optSimplifyHsk4').addEventListener('change', function() {
+    if (this.checked && selectedTier === 'google' && !selectedModel) {
+        // Auto-select premium tier for HSK simplification
+        document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('selected'));
+        const premBtn = document.querySelector('.tier-btn[data-tier="premium"]');
+        if (premBtn && !premBtn.classList.contains('disabled')) {
+            premBtn.classList.add('selected');
+            selectedTier = 'premium';
+            selectedModel = 'anthropic/claude-sonnet-4-5';
+            updateModelPickerSelection();
+        }
+    }
+});
 
 // --- Convert with SSE progress ---
 $('convertBtn').onclick = async () => {
@@ -304,7 +527,8 @@ $('convertBtn').onclick = async () => {
     formData.append('file', selectedFile);
     formData.append('outputs', JSON.stringify([...selected]));
     formData.append('target', $('optTarget').value);
-    formData.append('quality', $('optQuality').value);
+    formData.append('llm_model', selectedModel);
+    formData.append('simplify_hsk4', $('optSimplifyHsk4').checked);
     formData.append('add_pinyin', $('optPinyin').checked);
     formData.append('add_translation', $('optTranslation').checked);
     formData.append('word_spacing', $('optWordSpacing').checked);
@@ -398,14 +622,26 @@ def index():
 def check_deps():
     """Check optional dependency availability."""
     return jsonify({
-        'claude': is_openrouter_available() and bool(get_api_key()),
+        'openrouter': is_openrouter_available() and bool(get_api_key()),
     })
+
+
+@app.route('/models')
+def models_endpoint():
+    """Return the model catalog as JSON."""
+    result = {}
+    for model_id, info in MODELS.items():
+        result[model_id] = {
+            **info,
+            'estimated_book_cost': estimate_book_cost(model_id),
+        }
+    return jsonify(result)
 
 
 def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
                      target, add_pinyin, add_translation, word_spacing,
                      parallel_text, bilingual,
-                     use_claude, use_opus, simplify_hsk4):
+                     llm_model, simplify_hsk4):
     """Background conversion worker."""
     job = _jobs[job_id]
 
@@ -430,8 +666,7 @@ def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
                 parallel_text=parallel_text,
                 word_spacing=word_spacing,
                 simplify_hsk4=simplify_hsk4,
-                use_claude_translator=use_claude,
-                use_opus=use_opus,
+                llm_model=llm_model or None,
                 progress_callback=progress,
             )
             generated_files.append((f'{orig_name}_graded.epub', epub_path))
@@ -445,8 +680,7 @@ def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
                 epub_path=input_path,
                 output_path=anki_path,
                 translation_target=target,
-                use_claude=use_claude,
-                use_opus=use_opus,
+                llm_model=llm_model or None,
             )
             generated_files.append((f'{orig_name}_flashcards.apkg', anki_path))
 
@@ -460,8 +694,7 @@ def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
                 output_path=audio_path,
                 translation_target=target,
                 bilingual=bilingual,
-                use_claude=use_claude,
-                use_opus=use_opus,
+                llm_model=llm_model or None,
             )
             result_ext = Path(result_path).suffix
             generated_files.append((
@@ -495,8 +728,6 @@ def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
 
 @app.route('/convert', methods=['POST'])
 def convert():
-    import json
-
     if 'file' not in request.files:
         return 'No file uploaded', 400
 
@@ -506,7 +737,8 @@ def convert():
 
     outputs = json.loads(request.form.get('outputs', '["epub"]'))
     target = request.form.get('target', 'en')
-    quality = request.form.get('quality', 'standard')
+    llm_model = request.form.get('llm_model', '').strip()
+    simplify_hsk4 = request.form.get('simplify_hsk4', 'false') == 'true'
 
     add_pinyin = request.form.get('add_pinyin', 'true') == 'true'
     add_translation = request.form.get('add_translation', 'true') == 'true'
@@ -514,15 +746,15 @@ def convert():
     parallel_text = request.form.get('parallel_text', 'false') == 'true'
     bilingual = request.form.get('bilingual', 'true') == 'true'
 
-    use_claude = quality in ('claude', 'simplified')
-    use_opus = False
-    simplify_hsk4 = quality == 'simplified'
+    # HSK simplification always needs an LLM
+    if simplify_hsk4 and not llm_model:
+        llm_model = TIER_DEFAULTS["premium"]
+
+    if llm_model and (not is_openrouter_available() or not get_api_key()):
+        return 'OPENROUTER_API_KEY required for LLM models. Select the Free tier.', 400
 
     if not outputs:
         return 'Select at least one output type', 400
-
-    if (simplify_hsk4 or use_claude) and (not is_openrouter_available() or not get_api_key()):
-        return 'Claude API not available. Select Standard quality.', 400
 
     orig_name = Path(file.filename).stem
 
@@ -555,7 +787,7 @@ def convert():
         args=(job_id, input_path, orig_name, tmpdir, outputs,
               target, add_pinyin, add_translation, word_spacing,
               parallel_text, bilingual,
-              use_claude, use_opus, simplify_hsk4),
+              llm_model, simplify_hsk4),
         daemon=True,
     )
     thread.start()
@@ -581,7 +813,6 @@ def progress(job_id):
                 break
             time.sleep(0.5)
 
-    import json
     return Response(stream(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
