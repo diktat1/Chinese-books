@@ -395,6 +395,14 @@ function buildModelPicker(models) {
     const tiers = ['free', 'standard', 'premium'];
     const tierLabels = { free: 'Free (OpenRouter)', standard: 'Standard', premium: 'Premium' };
 
+    // Show warning banner if no API key
+    if (!hasApiKey) {
+        const warn = document.createElement('div');
+        warn.style.cssText = 'background:#fff3cd;color:#856404;padding:10px 12px;border-radius:6px;font-size:.82em;margin-bottom:10px';
+        warn.innerHTML = 'All OpenRouter models require <b>OPENROUTER_API_KEY</b>. Set it in your HuggingFace Space secrets, then restart the Space.';
+        picker.appendChild(warn);
+    }
+
     tiers.forEach(tier => {
         const tierModels = Object.entries(models).filter(([_, m]) => m.tier === tier);
         if (!tierModels.length) return;
@@ -406,12 +414,14 @@ function buildModelPicker(models) {
 
         tierModels.forEach(([id, m]) => {
             const opt = document.createElement('div');
-            opt.className = 'model-option';
+            const disabled = !hasApiKey;
+            opt.className = 'model-option' + (disabled ? ' disabled-model' : '');
+            if (disabled) opt.style.opacity = '0.45';
             const qualityClass = m.chinese_quality.replace(' ', '_');
             const cost = m.input_price === 0 ? '$0.00' : '~$' + estimateCost(m);
             const note = m.note ? ' ' + m.note : '';
             opt.innerHTML = `
-                <input type="radio" name="llm_model" value="${id}">
+                <input type="radio" name="llm_model" value="${id}" ${disabled ? 'disabled' : ''}>
                 <div class="model-info">
                     <div class="model-name">${m.name} <span style="color:#aaa;font-weight:400;font-size:.8em">${m.provider}</span></div>
                     <div class="model-desc">${m.description}${note}</div>
@@ -421,25 +431,24 @@ function buildModelPicker(models) {
                     </div>
                 </div>
             `;
-            opt.addEventListener('click', () => {
-                selectedModel = id;
-                selectedTier = m.tier === 'free' ? 'free' : m.tier;
-                // Update tier buttons
-                document.querySelectorAll('.tier-btn').forEach(b => {
-                    const t = b.dataset.tier;
-                    b.classList.toggle('selected',
-                        (t === 'google' && !selectedModel) ||
-                        (t === selectedTier && selectedModel));
+            if (!disabled) {
+                opt.addEventListener('click', () => {
+                    selectedModel = id;
+                    selectedTier = m.tier === 'free' ? 'free' : m.tier;
+                    document.querySelectorAll('.tier-btn').forEach(b => {
+                        const t = b.dataset.tier;
+                        b.classList.toggle('selected',
+                            (t === 'google' && !selectedModel) ||
+                            (t === selectedTier && selectedModel));
+                    });
+                    if (selectedModel) {
+                        document.querySelector('.tier-btn[data-tier="google"]').classList.remove('selected');
+                        const tierBtn = document.querySelector(`.tier-btn[data-tier="${selectedTier}"]`);
+                        if (tierBtn) tierBtn.classList.add('selected');
+                    }
+                    updateModelPickerSelection();
                 });
-                // Deselect Google if we picked a model
-                if (selectedModel) {
-                    document.querySelector('.tier-btn[data-tier="google"]').classList.remove('selected');
-                    // Select the matching tier
-                    const tierBtn = document.querySelector(`.tier-btn[data-tier="${selectedTier}"]`);
-                    if (tierBtn) tierBtn.classList.add('selected');
-                }
-                updateModelPickerSelection();
-            });
+            }
             picker.appendChild(opt);
         });
     });
@@ -454,6 +463,7 @@ function buildModelPicker(models) {
     customInput.className = 'custom-model-input';
     customInput.type = 'text';
     customInput.placeholder = 'e.g. mistralai/mistral-nemo';
+    if (!hasApiKey) customInput.disabled = true;
     customInput.addEventListener('input', () => {
         const val = customInput.value.trim();
         if (val) {
@@ -510,6 +520,15 @@ $('optSimplifyHsk4').addEventListener('change', function() {
 // --- Convert with SSE progress ---
 $('convertBtn').onclick = async () => {
     if (!selectedFile || selected.size === 0) return;
+
+    // Client-side API key check
+    if (selectedModel && !hasApiKey) {
+        const status = $('status');
+        status.className = 'status err';
+        status.style.display = 'block';
+        status.textContent = 'OPENROUTER_API_KEY not configured. Select "Free" (Google Translate) or set the API key in Space secrets.';
+        return;
+    }
 
     const btn = $('convertBtn');
     const status = $('status');
@@ -801,17 +820,24 @@ def progress(job_id):
     import time
 
     def stream():
+        last_data = None
         while True:
             job = _jobs.get(job_id)
             if not job:
                 yield f"data: {json.dumps({'status': 'error', 'message': 'Job not found'})}\n\n"
                 break
 
-            yield f"data: {json.dumps({'status': job['status'], 'progress': job['progress'], 'message': job['message']})}\n\n"
+            data = json.dumps({'status': job['status'], 'progress': job['progress'], 'message': job['message']})
+            if data != last_data:
+                yield f"data: {data}\n\n"
+                last_data = data
 
             if job['status'] in ('done', 'error'):
                 break
-            time.sleep(0.5)
+
+            # Send SSE comment as heartbeat to prevent proxy idle timeout
+            yield ": heartbeat\n\n"
+            time.sleep(1)
 
     return Response(stream(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

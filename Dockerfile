@@ -27,4 +27,4 @@ USER user
 
 EXPOSE 7860
 
-CMD ["gunicorn", "web_app:app", "--bind", "0.0.0.0:7860", "--timeout", "600", "--workers", "2"]
+CMD ["gunicorn", "web_app:app", "--bind", "0.0.0.0:7860", "--timeout", "600", "--workers", "1", "--threads", "8"]
