@@ -18,5 +18,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          git config --global credential.helper store
+          echo "https://bright83:${HF_TOKEN}@huggingface.co" > ~/.git-credentials
           git remote add hf https://huggingface.co/spaces/bright83/language-study
-          git -c http.extraheader="Authorization: Bearer ${HF_TOKEN}" push hf main:main --force
+          git push hf main:main --force
