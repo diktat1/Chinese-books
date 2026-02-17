@@ -34,7 +34,8 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB max upload
 
 # In-memory job store for SSE progress tracking
-_jobs = {}  # job_id -> {status, progress, message, result_files, tmpdir, error}
+# job_id -> {status, progress, message, outputs: {type: {status, progress, message, file}}, ...}
+_jobs = {}
 
 HTML_PAGE = '''
 <!DOCTYPE html>
@@ -175,7 +176,7 @@ HTML_PAGE = '''
         .status.ok { display: block; background: #d4edda; color: #155724; }
         .status.err { display: block; background: #f8d7da; color: #721c24; }
         .small { font-size: .78em; color: #aaa; line-height: 1.5; margin-top: 10px; }
-        /* Progress bar */
+        /* Progress bar (overall) */
         .progress-bar {
             height: 4px; background: #eee; border-radius: 2px;
             margin-top: 8px; overflow: hidden; display: none;
@@ -192,6 +193,47 @@ HTML_PAGE = '''
         @keyframes indeterminate {
             0% { width: 0; margin-left: 0; } 50% { width: 60%; margin-left: 20%; } 100% { width: 0; margin-left: 100%; }
         }
+        /* Per-output progress cards */
+        .output-progress { margin-top: 14px; display: none; }
+        .output-progress.active { display: block; }
+        .out-card {
+            display: flex; align-items: center; gap: 12px;
+            padding: 12px 14px; border: 1px solid #eee; border-radius: 8px;
+            margin-bottom: 8px; background: #fafafa; transition: all .2s;
+        }
+        .out-card.st-running { border-color: #3498db; background: #f5f9fe; }
+        .out-card.st-done { border-color: #27ae60; background: #f0faf4; }
+        .out-card.st-error { border-color: #e74c3c; background: #fef5f5; }
+        .out-card-icon { font-size: 1.3em; flex-shrink: 0; }
+        .out-card-body { flex: 1; min-width: 0; }
+        .out-card-name { font-weight: 600; font-size: .88em; }
+        .out-card-msg { font-size: .78em; color: #888; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .out-card-bar {
+            height: 3px; background: #eee; border-radius: 2px;
+            margin-top: 5px; overflow: hidden;
+        }
+        .out-card-bar .out-card-fill {
+            height: 100%; background: #3498db; border-radius: 2px;
+            transition: width 0.3s ease; width: 0%;
+        }
+        .out-card.st-done .out-card-bar .out-card-fill { background: #27ae60; width: 100%; }
+        .out-card.st-error .out-card-bar .out-card-fill { background: #e74c3c; }
+        .out-card-actions { flex-shrink: 0; display: flex; gap: 6px; }
+        .dl-btn, .retry-btn {
+            padding: 6px 14px; border-radius: 6px; border: none;
+            font-size: .8em; font-weight: 600; cursor: pointer; transition: background .15s;
+        }
+        .dl-btn { background: #27ae60; color: #fff; }
+        .dl-btn:hover { background: #219a52; }
+        .retry-btn { background: #e67e22; color: #fff; }
+        .retry-btn:hover { background: #d35400; }
+        .download-all-btn {
+            background: #27ae60; color: #fff; border: none; padding: 12px;
+            border-radius: 8px; font-size: .95em; font-weight: 600;
+            cursor: pointer; width: 100%; margin-top: 8px; display: none;
+            transition: background .15s;
+        }
+        .download-all-btn:hover { background: #219a52; }
     </style>
 </head>
 <body>
@@ -287,14 +329,16 @@ HTML_PAGE = '''
     </div>
 </div>
 
-<div class="card">
+<div class="card" id="progressCard">
     <button class="convert-btn" id="convertBtn" disabled>Convert</button>
     <div class="progress-bar" id="progressBar"><div class="fill"></div></div>
+    <div class="output-progress" id="outputProgress"></div>
+    <button class="download-all-btn" id="downloadAllBtn">Download All as ZIP</button>
     <div class="status" id="status"></div>
     <p class="small">
         Graded reader: seconds (pinyin only) to minutes (with translation).<br>
         Anki: ~1 min per 100 sentences. Audiobook: ~2 min per chapter.<br>
-        Multiple outputs are bundled in a single ZIP download.
+        Each output downloads individually as it completes.
     </p>
 </div>
 
@@ -308,6 +352,17 @@ let modelCatalog = {};
 let hasApiKey = false;
 let selectedTier = 'google';
 let selectedModel = '';  // empty = Google Translate, else OpenRouter model ID
+
+// --- Active job tracking ---
+let activeJobId = null;
+let activeEventSource = null;
+let jobRunning = false;
+
+const OUTPUT_META = {
+    epub:  { icon: '\\u{1F4D6}', name: 'Graded Reader' },
+    anki:  { icon: '\\u{1F0CF}', name: 'Flashcards' },
+    audio: { icon: '\\u{1F3A7}', name: 'Audiobook' }
+};
 
 // --- Output selection ---
 const selected = new Set(['epub']);
@@ -324,7 +379,7 @@ document.querySelectorAll('.output-btn').forEach(btn => {
 function updateUI() {
     $('epubOptions').style.display = selected.has('epub') ? '' : 'none';
     $('audioOptions').style.display = selected.has('audio') ? '' : 'none';
-    const label = selected.size > 1 ? 'Convert & Download ZIP' :
+    const label = selected.size > 1 ? 'Convert & Download' :
                   selected.has('epub') ? 'Convert to Graded Reader' :
                   selected.has('anki') ? 'Generate Flashcards' :
                   selected.has('audio') ? 'Generate Audiobook' : 'Select an output';
@@ -517,7 +572,273 @@ $('optSimplifyHsk4').addEventListener('change', function() {
     }
 });
 
-// --- Convert with SSE progress ---
+// ============================================================
+// Per-output progress UI helpers
+// ============================================================
+
+function buildOutputCards(outputTypes) {
+    const container = $('outputProgress');
+    container.innerHTML = '';
+    outputTypes.forEach(type => {
+        const meta = OUTPUT_META[type] || { icon: '?', name: type };
+        const card = document.createElement('div');
+        card.className = 'out-card';
+        card.id = 'out-card-' + type;
+        card.innerHTML =
+            '<div class="out-card-icon">' + meta.icon + '</div>' +
+            '<div class="out-card-body">' +
+                '<div class="out-card-name">' + meta.name + '</div>' +
+                '<div class="out-card-msg" id="out-msg-' + type + '">Waiting...</div>' +
+                '<div class="out-card-bar"><div class="out-card-fill" id="out-fill-' + type + '"></div></div>' +
+            '</div>' +
+            '<div class="out-card-actions" id="out-actions-' + type + '"></div>';
+        container.appendChild(card);
+    });
+    container.classList.add('active');
+}
+
+function updateOutputCard(type, outData) {
+    const card = $('out-card-' + type);
+    if (!card) return;
+    const msg = $('out-msg-' + type);
+    const fill = $('out-fill-' + type);
+    const actions = $('out-actions-' + type);
+
+    // Update status class
+    card.className = 'out-card st-' + outData.status;
+
+    // Update message
+    if (outData.message) {
+        msg.textContent = outData.message;
+    } else if (outData.status === 'pending') {
+        msg.textContent = 'Waiting...';
+    } else if (outData.status === 'running') {
+        msg.textContent = 'Processing...';
+    }
+
+    // Update progress bar
+    if (outData.status === 'done') {
+        fill.style.width = '100%';
+    } else if (outData.status === 'error') {
+        fill.style.width = '100%';
+    } else {
+        fill.style.width = (outData.progress || 0) + '%';
+    }
+
+    // Update action buttons
+    if (outData.status === 'done' && outData.has_file && !actions.querySelector('.dl-btn')) {
+        actions.innerHTML = '';
+        var dlBtn = document.createElement('button');
+        dlBtn.className = 'dl-btn';
+        dlBtn.textContent = 'Download';
+        dlBtn.onclick = function() { triggerDownload(activeJobId, type); };
+        actions.appendChild(dlBtn);
+    } else if (outData.status === 'error' && !actions.querySelector('.retry-btn')) {
+        actions.innerHTML = '';
+        var retryBtn = document.createElement('button');
+        retryBtn.className = 'retry-btn';
+        retryBtn.textContent = 'Retry';
+        retryBtn.onclick = function() { retryOutput(activeJobId, type); };
+        actions.appendChild(retryBtn);
+    }
+}
+
+function updateDownloadAllButton(outputs) {
+    var doneCount = 0;
+    var totalCount = 0;
+    for (var k in outputs) {
+        totalCount++;
+        if (outputs[k].status === 'done' && outputs[k].has_file) doneCount++;
+    }
+    var btn = $('downloadAllBtn');
+    if (doneCount > 1) {
+        btn.style.display = 'block';
+        btn.textContent = 'Download All (' + doneCount + ' files) as ZIP';
+    } else {
+        btn.style.display = 'none';
+    }
+}
+
+// ============================================================
+// Download via direct URL (NOT blob - fixes corrupt ZIP issue)
+// ============================================================
+
+function triggerDownload(jobId, outputType) {
+    var a = document.createElement('a');
+    if (outputType) {
+        a.href = '/download/' + jobId + '/' + outputType;
+    } else {
+        a.href = '/download/' + jobId;
+    }
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+// ============================================================
+// SSE connection
+// ============================================================
+
+function connectSSE(jobId) {
+    if (activeEventSource) {
+        activeEventSource.close();
+    }
+
+    var es = new EventSource('/progress/' + jobId);
+    activeEventSource = es;
+
+    es.onmessage = function(e) {
+        var d = JSON.parse(e.data);
+
+        // Update overall progress bar
+        var bar = $('progressBar');
+        var fill = bar.querySelector('.fill');
+        if (d.progress !== undefined) {
+            fill.style.width = d.progress + '%';
+        }
+
+        // Update overall status message
+        var status = $('status');
+        if (d.message) {
+            status.className = 'status info';
+            status.style.display = 'block';
+            status.textContent = d.message;
+        }
+
+        // Update per-output cards
+        if (d.outputs) {
+            for (var type in d.outputs) {
+                updateOutputCard(type, d.outputs[type]);
+            }
+            updateDownloadAllButton(d.outputs);
+        }
+
+        // Terminal states
+        if (d.status === 'done') {
+            es.close();
+            activeEventSource = null;
+            jobRunning = false;
+            bar.classList.remove('active', 'indeterminate');
+
+            // Check if any outputs succeeded
+            var anyDone = false;
+            var anyError = false;
+            if (d.outputs) {
+                for (var k in d.outputs) {
+                    if (d.outputs[k].status === 'done') anyDone = true;
+                    if (d.outputs[k].status === 'error') anyError = true;
+                }
+            }
+
+            if (anyDone && anyError) {
+                status.className = 'status info';
+                status.textContent = d.message || 'Some outputs completed. Download what succeeded, or retry the rest.';
+            } else if (anyDone) {
+                status.className = 'status ok';
+                status.textContent = d.message || 'All done! Click download above.';
+            } else {
+                status.className = 'status err';
+                status.textContent = d.message || 'All outputs failed.';
+            }
+            $('convertBtn').disabled = false;
+        } else if (d.status === 'error') {
+            es.close();
+            activeEventSource = null;
+            jobRunning = false;
+            bar.classList.remove('active', 'indeterminate');
+            status.className = 'status err';
+            status.textContent = d.message || 'Conversion failed';
+            $('convertBtn').disabled = false;
+        }
+    };
+
+    es.onerror = function() {
+        es.close();
+        activeEventSource = null;
+        // Don't set jobRunning=false; the job may still be running server-side.
+        // Show reconnect option.
+        var status = $('status');
+        status.className = 'status info';
+        status.style.display = 'block';
+        status.textContent = 'Connection lost. The job is still running on the server.';
+
+        // Try to reconnect after 3 seconds
+        setTimeout(function() {
+            if (activeJobId && !activeEventSource) {
+                fetch('/job/' + activeJobId).then(function(r) { return r.json(); }).then(function(job) {
+                    if (job.found) {
+                        if (job.status === 'running') {
+                            status.textContent = 'Reconnected! Resuming progress...';
+                            connectSSE(activeJobId);
+                        } else {
+                            // Job finished while we were disconnected
+                            jobRunning = false;
+                            $('convertBtn').disabled = false;
+                            $('progressBar').classList.remove('active', 'indeterminate');
+                            if (job.outputs) {
+                                for (var k in job.outputs) {
+                                    updateOutputCard(k, job.outputs[k]);
+                                }
+                                updateDownloadAllButton(job.outputs);
+                            }
+                            if (job.status === 'done') {
+                                status.className = 'status ok';
+                                status.textContent = job.message || 'Done! Download your files above.';
+                            } else {
+                                status.className = 'status err';
+                                status.textContent = job.message || 'Job failed.';
+                            }
+                        }
+                    }
+                }).catch(function() {
+                    status.textContent = 'Connection lost. Refresh the page to check job status.';
+                });
+            }
+        }, 3000);
+    };
+}
+
+// ============================================================
+// Retry a failed output
+// ============================================================
+
+function retryOutput(jobId, outputType) {
+    var actions = $('out-actions-' + outputType);
+    if (actions) actions.innerHTML = '';
+    var msg = $('out-msg-' + outputType);
+    if (msg) msg.textContent = 'Retrying...';
+    var card = $('out-card-' + outputType);
+    if (card) card.className = 'out-card st-running';
+    var fill = $('out-fill-' + outputType);
+    if (fill) fill.style.width = '0%';
+
+    jobRunning = true;
+    $('progressBar').classList.add('active');
+    $('progressBar').classList.remove('indeterminate');
+
+    fetch('/retry/' + jobId + '/' + outputType, { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (d.ok) {
+                connectSSE(jobId);
+            } else {
+                if (msg) msg.textContent = 'Retry failed: ' + (d.error || 'unknown');
+                if (card) card.className = 'out-card st-error';
+                jobRunning = false;
+            }
+        })
+        .catch(function(err) {
+            if (msg) msg.textContent = 'Retry failed: ' + err.message;
+            if (card) card.className = 'out-card st-error';
+            jobRunning = false;
+        });
+}
+
+// ============================================================
+// Convert button handler
+// ============================================================
+
 $('convertBtn').onclick = async () => {
     if (!selectedFile || selected.size === 0) return;
 
@@ -541,6 +862,9 @@ $('convertBtn').onclick = async () => {
     status.className = 'status info';
     status.style.display = 'block';
     status.textContent = 'Uploading...';
+    $('outputProgress').classList.remove('active');
+    $('outputProgress').innerHTML = '';
+    $('downloadAllBtn').style.display = 'none';
 
     const formData = new FormData();
     formData.append('file', selectedFile);
@@ -558,60 +882,33 @@ $('convertBtn').onclick = async () => {
         // Step 1: Start the job
         const startResp = await fetch('/convert', { method: 'POST', body: formData });
         if (!startResp.ok) throw new Error(await startResp.text());
-        const { job_id } = await startResp.json();
+        const data = await startResp.json();
+        const jobId = data.job_id;
 
-        // Step 2: Listen for SSE progress
+        // Save job ID for reconnection
+        activeJobId = jobId;
+        jobRunning = true;
+        try { localStorage.setItem('active_job', jobId); } catch(e) {}
+
+        // Step 2: Build per-output progress cards
         bar.classList.remove('indeterminate');
         status.textContent = 'Processing...';
+        buildOutputCards([...selected]);
 
-        await new Promise((resolve, reject) => {
-            const es = new EventSource('/progress/' + job_id);
-            es.onmessage = (e) => {
-                const d = JSON.parse(e.data);
-                if (d.progress !== undefined) {
-                    fill.style.width = d.progress + '%';
-                }
-                if (d.message) {
-                    status.textContent = d.message;
-                }
-                if (d.status === 'done') {
-                    es.close();
-                    resolve();
-                } else if (d.status === 'error') {
-                    es.close();
-                    reject(new Error(d.message || 'Conversion failed'));
-                }
-            };
-            es.onerror = () => { es.close(); reject(new Error('Connection lost')); };
-        });
+        // Step 3: Connect SSE for progress
+        connectSSE(jobId);
 
-        // Step 3: Download the result
-        fill.style.width = '100%';
-        status.textContent = 'Downloading...';
-        const dlResp = await fetch('/download/' + job_id);
-        if (!dlResp.ok) throw new Error(await dlResp.text());
-
-        const blob = await dlResp.blob();
-        const cd = dlResp.headers.get('Content-Disposition') || '';
-        const match = cd.match(/filename="?([^"]+)"?/);
-        const filename = match ? match[1] : 'output.epub';
-
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = filename;
-        document.body.appendChild(a); a.click(); a.remove();
-        URL.revokeObjectURL(url);
-
-        status.className = 'status ok';
-        status.textContent = 'Done! Download started.';
     } catch(err) {
         status.className = 'status err';
         status.textContent = 'Error: ' + err.message;
-    } finally {
         btn.disabled = false;
         bar.classList.remove('active', 'indeterminate');
+        jobRunning = false;
     }
 };
+
+// Download All button
+$('downloadAllBtn').onclick = function() { if (activeJobId) triggerDownload(activeJobId, null); };
 
 // Parallel text requires translation
 $('optParallelText').addEventListener('change', function() {
@@ -622,6 +919,74 @@ $('optParallelText').addEventListener('change', function() {
 $('optTranslation').addEventListener('change', function() {
     if (!this.checked && $('optParallelText').checked) {
         $('optParallelText').checked = false;
+    }
+});
+
+// ============================================================
+// Reconnect to in-progress job on page load
+// ============================================================
+
+(function checkPreviousJob() {
+    var savedJobId;
+    try { savedJobId = localStorage.getItem('active_job'); } catch(e) {}
+    if (!savedJobId) return;
+
+    fetch('/job/' + savedJobId)
+        .then(function(r) { return r.json(); })
+        .then(function(job) {
+            if (!job.found) {
+                try { localStorage.removeItem('active_job'); } catch(e) {}
+                return;
+            }
+
+            activeJobId = savedJobId;
+
+            // Build output cards from job data
+            var outputTypes = Object.keys(job.outputs || {});
+            if (outputTypes.length === 0) {
+                try { localStorage.removeItem('active_job'); } catch(e) {}
+                return;
+            }
+
+            buildOutputCards(outputTypes);
+            for (var k in job.outputs) {
+                updateOutputCard(k, job.outputs[k]);
+            }
+            updateDownloadAllButton(job.outputs);
+
+            var status = $('status');
+            status.style.display = 'block';
+
+            if (job.status === 'running') {
+                // Job still running - reconnect SSE
+                jobRunning = true;
+                $('convertBtn').disabled = true;
+                $('progressBar').classList.add('active');
+                $('progressBar').querySelector('.fill').style.width = job.progress + '%';
+                status.className = 'status info';
+                status.textContent = 'Reconnected to running job: ' + (job.message || 'Processing...');
+                connectSSE(savedJobId);
+            } else if (job.status === 'done') {
+                status.className = 'status ok';
+                status.textContent = job.message || 'Previous job completed. Download your files above.';
+            } else {
+                status.className = 'status err';
+                status.textContent = job.message || 'Previous job failed. You can retry individual outputs.';
+            }
+        })
+        .catch(function() {
+            try { localStorage.removeItem('active_job'); } catch(e) {}
+        });
+})();
+
+// ============================================================
+// Warn before navigating away during processing
+// ============================================================
+
+window.addEventListener('beforeunload', function(e) {
+    if (jobRunning) {
+        e.preventDefault();
+        e.returnValue = '';
     }
 });
 
@@ -657,92 +1022,102 @@ def models_endpoint():
     return jsonify(result)
 
 
-def _run_conversion(job_id, input_path, orig_name, tmpdir, outputs,
-                     target, add_pinyin, add_translation, word_spacing,
-                     parallel_text, bilingual,
-                     llm_model, simplify_hsk4):
-    """Background conversion worker."""
+def _run_conversion(job_id, outputs_to_run=None):
+    """Background conversion worker. Processes each output independently."""
     job = _jobs[job_id]
+    p = job['params']
+    input_path = job['input_path']
+    orig_name = job['orig_name']
+    tmpdir = job['tmpdir']
 
-    def progress(step, total, message):
-        pct = int(step / max(total, 1) * 100) if total else 0
-        job['progress'] = pct
-        job['message'] = message
+    outputs = outputs_to_run or list(job['outputs'].keys())
+    total_outputs = len(outputs)
 
-    generated_files = []
+    for idx, out_type in enumerate(outputs):
+        out = job['outputs'][out_type]
+        out['status'] = 'running'
+        out['progress'] = 0
 
-    try:
-        # --- Graded reader EPUB ---
-        if 'epub' in outputs:
-            progress(0, 1, 'Building graded reader...')
-            epub_path = os.path.join(tmpdir, 'graded.epub')
-            process_epub(
-                input_path=input_path,
-                output_path=epub_path,
-                add_pinyin=add_pinyin,
-                add_translation=add_translation,
-                translation_target=target,
-                parallel_text=parallel_text,
-                word_spacing=word_spacing,
-                simplify_hsk4=simplify_hsk4,
-                llm_model=llm_model or None,
-                progress_callback=progress,
-            )
-            generated_files.append((f'{orig_name}_graded.epub', epub_path))
+        def _make_progress_cb(out_ref, out_idx):
+            def cb(step, total_steps, message):
+                pct = int(step / max(total_steps, 1) * 100) if total_steps else 0
+                out_ref['progress'] = pct
+                out_ref['message'] = message
+                overall_pct = int((out_idx * 100 + pct) / total_outputs)
+                job['progress'] = min(overall_pct, 99)
+                job['message'] = message
+            return cb
 
-        # --- Anki deck ---
-        if 'anki' in outputs:
-            progress(0, 1, 'Generating flashcards...')
-            from graded_reader.anki_generator import generate_anki_deck
-            anki_path = os.path.join(tmpdir, 'flashcards.apkg')
-            generate_anki_deck(
-                epub_path=input_path,
-                output_path=anki_path,
-                translation_target=target,
-                llm_model=llm_model or None,
-            )
-            generated_files.append((f'{orig_name}_flashcards.apkg', anki_path))
+        progress_cb = _make_progress_cb(out, idx)
 
-        # --- Audiobook ---
-        if 'audio' in outputs:
-            progress(0, 1, 'Generating audiobook...')
-            from graded_reader.audio_generator import generate_audiobook
-            audio_path = os.path.join(tmpdir, 'audiobook.m4b')
-            result_path = generate_audiobook(
-                epub_path=input_path,
-                output_path=audio_path,
-                translation_target=target,
-                bilingual=bilingual,
-                llm_model=llm_model or None,
-            )
-            result_ext = Path(result_path).suffix
-            generated_files.append((
-                f'{orig_name}_audiobook{result_ext}', result_path,
-            ))
+        try:
+            if out_type == 'epub':
+                progress_cb(0, 1, 'Building graded reader...')
+                epub_path = os.path.join(tmpdir, 'graded.epub')
+                process_epub(
+                    input_path=input_path,
+                    output_path=epub_path,
+                    add_pinyin=p['add_pinyin'],
+                    add_translation=p['add_translation'],
+                    translation_target=p['target'],
+                    parallel_text=p['parallel_text'],
+                    word_spacing=p['word_spacing'],
+                    simplify_hsk4=p['simplify_hsk4'],
+                    llm_model=p['llm_model'] or None,
+                    progress_callback=progress_cb,
+                )
+                out['file'] = (f'{orig_name}_graded.epub', epub_path)
 
-        if not generated_files:
-            job['status'] = 'error'
-            job['message'] = 'No outputs were generated'
-            return
+            elif out_type == 'anki':
+                progress_cb(0, 1, 'Generating flashcards...')
+                from graded_reader.anki_generator import generate_anki_deck
+                anki_path = os.path.join(tmpdir, 'flashcards.apkg')
+                generate_anki_deck(
+                    epub_path=input_path,
+                    output_path=anki_path,
+                    translation_target=p['target'],
+                    llm_model=p['llm_model'] or None,
+                )
+                out['file'] = (f'{orig_name}_flashcards.apkg', anki_path)
 
-        # Bundle if multiple files
-        if len(generated_files) == 1:
-            job['result_files'] = generated_files
-        else:
-            zip_path = os.path.join(tmpdir, 'bundle.zip')
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
-                for fname, fpath in generated_files:
-                    zf.write(fpath, fname)
-            job['result_files'] = [(f'{orig_name}_learning_kit.zip', zip_path)]
+            elif out_type == 'audio':
+                progress_cb(0, 1, 'Generating audiobook...')
+                from graded_reader.audio_generator import generate_audiobook
+                audio_path = os.path.join(tmpdir, 'audiobook.m4b')
+                result_path = generate_audiobook(
+                    epub_path=input_path,
+                    output_path=audio_path,
+                    translation_target=p['target'],
+                    bilingual=p['bilingual'],
+                    llm_model=p['llm_model'] or None,
+                )
+                result_ext = Path(result_path).suffix
+                out['file'] = (f'{orig_name}_audiobook{result_ext}', result_path)
 
+            out['status'] = 'done'
+            out['progress'] = 100
+            out['message'] = 'Ready to download'
+
+        except Exception as e:
+            logging.exception(f'Output {out_type} failed')
+            out['status'] = 'error'
+            out['message'] = f'Failed: {e}'
+
+    # Determine overall status
+    all_statuses = [job['outputs'][o]['status'] for o in job['outputs']]
+    done_count = sum(1 for s in all_statuses if s == 'done')
+    error_count = sum(1 for s in all_statuses if s == 'error')
+
+    job['progress'] = 100
+    if done_count == len(all_statuses):
         job['status'] = 'done'
-        job['progress'] = 100
-        job['message'] = 'Done!'
-
-    except Exception as e:
-        logging.exception('Conversion failed')
+        job['message'] = 'All outputs ready!'
+    elif done_count > 0:
+        job['status'] = 'done'
+        job['message'] = f'{done_count} of {len(all_statuses)} outputs ready ({error_count} failed)'
+    else:
         job['status'] = 'error'
-        job['message'] = f'Conversion failed: {e}'
+        job['message'] = 'All outputs failed'
 
 
 @app.route('/convert', methods=['POST'])
@@ -797,16 +1172,28 @@ def convert():
         'status': 'running',
         'progress': 0,
         'message': 'Starting...',
-        'result_files': None,
         'tmpdir': tmpdir,
+        'input_path': input_path,
+        'orig_name': orig_name,
+        'params': {
+            'target': target,
+            'add_pinyin': add_pinyin,
+            'add_translation': add_translation,
+            'word_spacing': word_spacing,
+            'parallel_text': parallel_text,
+            'bilingual': bilingual,
+            'llm_model': llm_model,
+            'simplify_hsk4': simplify_hsk4,
+        },
+        'outputs': {
+            out: {'status': 'pending', 'progress': 0, 'message': '', 'file': None}
+            for out in outputs
+        },
     }
 
     thread = threading.Thread(
         target=_run_conversion,
-        args=(job_id, input_path, orig_name, tmpdir, outputs,
-              target, add_pinyin, add_translation, word_spacing,
-              parallel_text, bilingual,
-              llm_model, simplify_hsk4),
+        args=(job_id,),
         daemon=True,
     )
     thread.start()
@@ -827,7 +1214,22 @@ def progress(job_id):
                 yield f"data: {json.dumps({'status': 'error', 'message': 'Job not found'})}\n\n"
                 break
 
-            data = json.dumps({'status': job['status'], 'progress': job['progress'], 'message': job['message']})
+            # Build per-output status (omitting internal file data)
+            outputs_status = {}
+            for k, v in job.get('outputs', {}).items():
+                outputs_status[k] = {
+                    'status': v['status'],
+                    'progress': v['progress'],
+                    'message': v['message'],
+                    'has_file': v['file'] is not None,
+                }
+
+            data = json.dumps({
+                'status': job['status'],
+                'progress': job['progress'],
+                'message': job['message'],
+                'outputs': outputs_status,
+            })
             if data != last_data:
                 yield f"data: {data}\n\n"
                 last_data = data
@@ -843,19 +1245,106 @@ def progress(job_id):
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
-@app.route('/download/<job_id>')
-def download(job_id):
-    """Download completed conversion result."""
+@app.route('/job/<job_id>')
+def job_status(job_id):
+    """Get full job status (used for reconnection after page reload)."""
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({'found': False})
+
+    outputs_status = {}
+    for k, v in job.get('outputs', {}).items():
+        outputs_status[k] = {
+            'status': v['status'],
+            'progress': v['progress'],
+            'message': v['message'],
+            'has_file': v['file'] is not None,
+        }
+
+    return jsonify({
+        'found': True,
+        'status': job['status'],
+        'progress': job['progress'],
+        'message': job['message'],
+        'outputs': outputs_status,
+    })
+
+
+@app.route('/download/<job_id>/<output_type>')
+def download_output(job_id, output_type):
+    """Download a single completed output."""
     job = _jobs.get(job_id)
     if not job:
         return 'Job not found', 404
-    if job['status'] != 'done':
-        return 'Job not ready', 400
-    if not job['result_files']:
-        return 'No files generated', 500
 
-    fname, fpath = job['result_files'][0]
+    out = job.get('outputs', {}).get(output_type)
+    if not out:
+        return 'Output type not found', 404
+    if out['status'] != 'done' or not out['file']:
+        return 'Output not ready', 400
+
+    fname, fpath = out['file']
     return send_file(fpath, as_attachment=True, download_name=fname)
+
+
+@app.route('/download/<job_id>')
+def download_bundle(job_id):
+    """Download all completed outputs (single file or ZIP bundle)."""
+    job = _jobs.get(job_id)
+    if not job:
+        return 'Job not found', 404
+
+    completed = [
+        (k, v['file']) for k, v in job.get('outputs', {}).items()
+        if v['status'] == 'done' and v['file']
+    ]
+    if not completed:
+        return 'No outputs ready', 400
+
+    if len(completed) == 1:
+        fname, fpath = completed[0][1]
+        return send_file(fpath, as_attachment=True, download_name=fname)
+
+    # Bundle multiple files into a ZIP
+    orig_name = job.get('orig_name', 'output')
+    zip_path = os.path.join(job['tmpdir'], 'bundle.zip')
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_STORED) as zf:
+        for _, (fname, fpath) in completed:
+            zf.write(fpath, fname)
+    return send_file(zip_path, as_attachment=True,
+                     download_name=f'{orig_name}_learning_kit.zip')
+
+
+@app.route('/retry/<job_id>/<output_type>', methods=['POST'])
+def retry_output(job_id, output_type):
+    """Retry a failed output without re-running successful ones."""
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({'ok': False, 'error': 'Job not found'}), 404
+
+    out = job.get('outputs', {}).get(output_type)
+    if not out:
+        return jsonify({'ok': False, 'error': 'Output type not found'}), 404
+    if out['status'] == 'running':
+        return jsonify({'ok': False, 'error': 'Output already running'}), 400
+
+    # Reset this output
+    out['status'] = 'pending'
+    out['progress'] = 0
+    out['message'] = ''
+    out['file'] = None
+    job['status'] = 'running'
+    job['progress'] = 0
+    job['message'] = f'Retrying {output_type}...'
+
+    thread = threading.Thread(
+        target=_run_conversion,
+        args=(job_id, [output_type]),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({'ok': True})
 
 
 if __name__ == '__main__':
