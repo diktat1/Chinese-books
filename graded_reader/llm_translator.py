@@ -1,8 +1,8 @@
 """
-Translation module using OpenRouter API.
+Translation module using OpenRouter API or Anthropic API directly.
 
 Provides high-quality Chinese to English (or other language) translation
-using LLMs (via OpenRouter) as an alternative to Google Translate.
+using LLMs (via OpenRouter or Anthropic) as an alternative to Google Translate.
 """
 
 import os
@@ -18,6 +18,48 @@ except ImportError:
     OPENROUTER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+# Anthropic direct API model name mapping
+_ANTHROPIC_MODEL_MAP = {
+    'claude-sonnet-4': 'claude-sonnet-4-20250514',
+    'claude-sonnet-4.5': 'claude-sonnet-4-5-20250514',
+    'claude-haiku-4': 'claude-haiku-4-20250414',
+    'claude-opus-4': 'claude-opus-4-20250514',
+}
+
+
+def _is_anthropic_direct(model: str) -> bool:
+    """Check if a model ID should use the Anthropic API directly."""
+    if not model:
+        return False
+    return (
+        model.startswith('claude-')
+        and '/' not in model
+        and os.environ.get('ANTHROPIC_API_KEY')
+    )
+
+
+def _call_anthropic_direct(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+) -> str | None:
+    """Call the Anthropic API directly. Returns response text or None."""
+    import anthropic
+
+    resolved = _ANTHROPIC_MODEL_MAP.get(model, model)
+    client = anthropic.Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+
+    message = client.messages.create(
+        model=resolved,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    if message.content and message.content[0].text:
+        return message.content[0].text.strip()
+    return None
 
 # Maximum text length per request (characters)
 MAX_CHUNK_SIZE = 4000
@@ -89,14 +131,17 @@ def translate_text_llm(
         Translated text.
         Returns original text with error note if translation fails.
     """
-    if not OPENROUTER_AVAILABLE:
-        logger.error("OpenAI SDK not installed. Install with: pip install openai")
-        return f"[Translation unavailable - openai not installed] {text}"
+    use_anthropic = model and _is_anthropic_direct(model)
 
-    api_key = get_api_key()
-    if not api_key:
-        logger.error("OPENROUTER_API_KEY environment variable not set")
-        return f"[Translation unavailable - API key not set] {text}"
+    if not use_anthropic:
+        if not OPENROUTER_AVAILABLE:
+            logger.error("OpenAI SDK not installed. Install with: pip install openai")
+            return f"[Translation unavailable - openai not installed] {text}"
+
+        api_key = get_api_key()
+        if not api_key:
+            logger.error("OPENROUTER_API_KEY environment variable not set")
+            return f"[Translation unavailable - API key not set] {text}"
 
     text = text.strip()
     if not text:
@@ -136,8 +181,6 @@ def _translate_with_retry(
     max_retries: int,
 ) -> str:
     """Translate text with exponential backoff retry."""
-    client = _create_client()
-
     system_prompt = f"""You are an expert translator specializing in {source} to {target} translation.
 
 Instructions:
@@ -154,6 +197,33 @@ Your translation should read naturally as if originally written in {target}."""
 {text}
 
 Remember: Output only the {target} translation, nothing else."""
+
+    # Route to Anthropic direct API if applicable
+    if _is_anthropic_direct(model):
+        for attempt in range(max_retries):
+            try:
+                result = _call_anthropic_direct(
+                    model, system_prompt, user_prompt,
+                    max_tokens=len(text) * 4,
+                )
+                if result:
+                    return result
+                return text
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        f'Anthropic translation error (attempt {attempt + 1}): {e}. '
+                        f'Retrying in {wait}s...'
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.error(f'Translation failed after {max_retries} attempts: {e}')
+                    return f'[Translation failed: {e}]'
+        return text
+
+    # OpenRouter path
+    client = _create_client()
 
     for attempt in range(max_retries):
         try:

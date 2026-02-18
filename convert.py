@@ -17,6 +17,8 @@ Usage:
 
 import argparse
 import logging
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -48,6 +50,8 @@ Examples:
   python convert.py book.epub --anki --max-sentences 100   # Limit to first 100 sentences
   python convert.py book.epub --audio --target fr          # Bilingual audiobook (French + Chinese)
   python convert.py book.epub --audio --no-bilingual       # Chinese-only audiobook
+  python convert.py book.epub --audio --target-languages fr,de,es,tr,pt,it  # Rotating languages
+  python convert.py book.epub --audio --simplify-hsk4 --hsk-level 4-5      # Simplified audiobook
   python convert.py --list-models                          # Show available models and pricing
         ''',
     )
@@ -114,8 +118,27 @@ Examples:
     parser.add_argument(
         '--simplify-hsk4',
         action='store_true',
-        help='Simplify Chinese vocabulary to HSK 4 level using an LLM. '
-             'Requires OPENROUTER_API_KEY environment variable.',
+        help='Simplify Chinese vocabulary to HSK level using an LLM. '
+             'Requires OPENROUTER_API_KEY or ANTHROPIC_API_KEY.',
+    )
+    parser.add_argument(
+        '--hsk-level',
+        default='4',
+        help='Target HSK level for simplification (default: 4). E.g., "4", "4-5".',
+    )
+    parser.add_argument(
+        '--max-sentence-words',
+        type=int,
+        default=0,
+        help='Maximum words per sentence for simplification (0 = no limit).',
+    )
+    parser.add_argument(
+        '--simplify-model',
+        help='Model ID for simplification (defaults to --model).',
+    )
+    parser.add_argument(
+        '--translate-model',
+        help='Model ID for translation (defaults to --model).',
     )
 
     # Anki deck generation
@@ -146,6 +169,11 @@ Examples:
         '--no-bilingual',
         action='store_true',
         help='Chinese-only audio (skip target language narration)',
+    )
+    parser.add_argument(
+        '--target-languages',
+        help='Comma-separated language codes to rotate through chapters '
+             '(e.g., fr,de,es,tr,pt,it). Overrides --target for audiobook.',
     )
 
     parser.add_argument(
@@ -194,8 +222,26 @@ Examples:
     if args.simplify_hsk4 and not llm_model:
         llm_model = TIER_DEFAULTS["premium"]
 
+    # Resolve separate simplification/translation models
+    simplify_model = args.simplify_model or llm_model
+    translate_model = args.translate_model or llm_model
+
+    # Check if any model uses Anthropic direct API
+    def _is_anthropic_model(m):
+        return m and m.startswith('claude-') and '/' not in m
+
+    any_anthropic = _is_anthropic_model(llm_model) or _is_anthropic_model(simplify_model) or _is_anthropic_model(translate_model)
+    any_openrouter = (llm_model and not _is_anthropic_model(llm_model)) or \
+                     (simplify_model and not _is_anthropic_model(simplify_model)) or \
+                     (translate_model and not _is_anthropic_model(translate_model))
+
+    # Validate Anthropic API key if needed
+    if any_anthropic and not os.environ.get('ANTHROPIC_API_KEY'):
+        print('Error: ANTHROPIC_API_KEY environment variable not set.', file=sys.stderr)
+        sys.exit(1)
+
     # Validate OpenRouter availability if LLM is needed
-    if llm_model:
+    if any_openrouter:
         if not is_openrouter_available():
             print('Error: OpenAI SDK not installed. Install with: pip install openai', file=sys.stderr)
             sys.exit(1)
@@ -240,22 +286,42 @@ Examples:
 
     # Audiobook mode
     if args.audio:
-        from graded_reader.audio_generator import generate_audiobook
+        from graded_reader.audio_generator import generate_audiobook, _get_book_metadata
+
+        # Parse target languages
+        target_langs = None
+        if args.target_languages:
+            target_langs = [l.strip() for l in args.target_languages.split(',')]
 
         if args.output:
             audio_output = Path(args.output)
         else:
-            audio_output = input_path.with_stem(input_path.stem + '_audiobook').with_suffix('.m4b')
+            # Generate English filename from book metadata
+            meta = _get_book_metadata(str(input_path), english=True)
+            if meta['author'] and meta['title']:
+                safe_author = re.sub(r'[^\w\s-]', '', meta['author']).strip()
+                safe_title = re.sub(r'[^\w\s-]', '', meta['title']).strip()
+                year_part = f" ({meta['year']})" if meta['year'] else ''
+                stem = f'{safe_author} - {safe_title}{year_part}_audiobook'
+            else:
+                stem = input_path.stem + '_audiobook'
+            audio_output = input_path.parent / (stem + '.m4b')
 
         bilingual = not args.no_bilingual
 
-        model_name = MODELS[llm_model]["name"] if llm_model and llm_model in MODELS else (llm_model or "Google Translate")
+        model_name = MODELS[translate_model]["name"] if translate_model and translate_model in MODELS else (translate_model or "Google Translate")
         print(f'Input:  {input_path}')
         print(f'Output: {audio_output} (format auto-detected)')
         print(f'Mode:   Audiobook')
         print(f'Engine: {model_name}')
+        if args.simplify_hsk4:
+            s_name = MODELS[simplify_model]["name"] if simplify_model and simplify_model in MODELS else (simplify_model or model_name)
+            print(f'Simplify: HSK {args.hsk_level} (model={s_name})')
         if bilingual:
-            print(f'Audio:  Bilingual ({args.target} + {args.source})')
+            if target_langs:
+                print(f'Audio:  Multilingual rotating ({", ".join(target_langs)} + {args.source})')
+            else:
+                print(f'Audio:  Bilingual ({args.target} + {args.source})')
         else:
             print(f'Audio:  Chinese only ({args.source})')
         print()
@@ -266,7 +332,12 @@ Examples:
             translation_target=args.target,
             translation_source=args.source,
             bilingual=bilingual,
-            llm_model=llm_model,
+            llm_model=translate_model,
+            target_languages=target_langs,
+            simplify_hsk4=args.simplify_hsk4,
+            hsk_level=args.hsk_level,
+            max_sentence_words=args.max_sentence_words,
+            simplify_model=simplify_model,
         )
         print(f'\nAudiobook written to: {result}')
         return
@@ -309,6 +380,11 @@ Examples:
     print(f'Mode:   {" + ".join(mode_parts)}')
     print()
 
+    # Parse target languages for EPUB mode too
+    epub_target_langs = None
+    if args.target_languages:
+        epub_target_langs = [l.strip() for l in args.target_languages.split(',')]
+
     process_epub(
         input_path=str(input_path),
         output_path=str(output_path),
@@ -320,6 +396,7 @@ Examples:
         parallel_text=args.parallel_text,
         simplify_hsk4=args.simplify_hsk4,
         llm_model=llm_model,
+        target_languages=epub_target_langs,
     )
 
     print(f'\nOutput written to: {output_path}')

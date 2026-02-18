@@ -1,9 +1,9 @@
 """
-HSK 4 Vocabulary Simplifier using OpenRouter API.
+HSK Vocabulary Simplifier using OpenRouter API or Anthropic API directly.
 
-This module uses LLMs (via OpenRouter) to simplify Chinese text to HSK 4
-vocabulary level, replacing advanced words with simpler equivalents that
-HSK 4 learners can understand.
+This module uses LLMs (via OpenRouter or Anthropic) to simplify Chinese text
+to a target HSK vocabulary level, replacing advanced words with simpler
+equivalents that learners can understand.
 """
 
 import os
@@ -19,6 +19,48 @@ except ImportError:
     OPENROUTER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+# Anthropic direct API model name mapping
+_ANTHROPIC_MODEL_MAP = {
+    'claude-sonnet-4': 'claude-sonnet-4-20250514',
+    'claude-sonnet-4.5': 'claude-sonnet-4-5-20250514',
+    'claude-haiku-4': 'claude-haiku-4-20250414',
+    'claude-opus-4': 'claude-opus-4-20250514',
+}
+
+
+def _is_anthropic_direct(model: str) -> bool:
+    """Check if a model ID should use the Anthropic API directly."""
+    if not model:
+        return False
+    return (
+        model.startswith('claude-')
+        and '/' not in model
+        and os.environ.get('ANTHROPIC_API_KEY')
+    )
+
+
+def _call_anthropic_direct(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+) -> str | None:
+    """Call the Anthropic API directly. Returns response text or None."""
+    import anthropic
+
+    resolved = _ANTHROPIC_MODEL_MAP.get(model, model)
+    client = anthropic.Anthropic(api_key=os.environ['ANTHROPIC_API_KEY'])
+
+    message = client.messages.create(
+        model=resolved,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    if message.content and message.content[0].text:
+        return message.content[0].text.strip()
+    return None
 
 
 def is_openrouter_available() -> bool:
@@ -47,30 +89,37 @@ def simplify_to_hsk4(
     text: str,
     model: Optional[str] = None,
     max_retries: int = 3,
+    hsk_level: str = '4',
+    max_sentence_words: int = 0,
 ) -> str:
     """
-    Simplify Chinese text to HSK 4 vocabulary level using an LLM.
+    Simplify Chinese text to a target HSK vocabulary level using an LLM.
 
-    Replaces advanced vocabulary (HSK 5-6 and beyond) with HSK 4 or simpler
-    equivalents while preserving the original meaning as much as possible.
+    Replaces advanced vocabulary with simpler equivalents that learners
+    at the target HSK level can understand.
 
     Args:
         text: The Chinese text to simplify.
-        model: OpenRouter model ID. Defaults to the premium tier default.
+        model: Model ID. Defaults to the premium tier default.
         max_retries: Number of retry attempts on API failure.
+        hsk_level: Target HSK level (e.g., '4', '4-5').
+        max_sentence_words: Max words per sentence (0=no limit).
 
     Returns:
-        Simplified Chinese text at HSK 4 level.
+        Simplified Chinese text.
         Returns original text with error note if simplification fails.
     """
-    if not OPENROUTER_AVAILABLE:
-        logger.error("OpenAI SDK not installed. Install with: pip install openai")
-        return f"[Simplification unavailable - openai not installed] {text}"
+    use_anthropic = model and _is_anthropic_direct(model)
 
-    api_key = get_api_key()
-    if not api_key:
-        logger.error("OPENROUTER_API_KEY environment variable not set")
-        return f"[Simplification unavailable - API key not set] {text}"
+    if not use_anthropic:
+        if not OPENROUTER_AVAILABLE:
+            logger.error("OpenAI SDK not installed. Install with: pip install openai")
+            return f"[Simplification unavailable - openai not installed] {text}"
+
+        api_key = get_api_key()
+        if not api_key:
+            logger.error("OPENROUTER_API_KEY environment variable not set")
+            return f"[Simplification unavailable - API key not set] {text}"
 
     text = text.strip()
     if not text:
@@ -80,32 +129,70 @@ def simplify_to_hsk4(
         from .models import TIER_DEFAULTS
         model = TIER_DEFAULTS["premium"]
 
-    return _simplify_with_retry(text, model, max_retries)
+    return _simplify_with_retry(text, model, max_retries, hsk_level, max_sentence_words)
 
 
-def _simplify_with_retry(text: str, model: str, max_retries: int) -> str:
+def _simplify_with_retry(
+    text: str,
+    model: str,
+    max_retries: int,
+    hsk_level: str = '4',
+    max_sentence_words: int = 0,
+) -> str:
     """Simplify text with exponential backoff retry."""
-    client = _create_client()
+    # Build dynamic system prompt based on HSK level
+    level_desc = f'HSK {hsk_level}'
+    word_limit_instr = ''
+    if max_sentence_words > 0:
+        word_limit_instr = (
+            f'\n7. Keep each sentence to approximately {max_sentence_words} '
+            f'words or fewer. Split longer sentences into shorter ones.'
+        )
 
-    system_prompt = """You are a Chinese language simplification expert. Your task is to simplify Chinese text to HSK 4 vocabulary level.
-
-HSK 4 represents an intermediate level with approximately 1,200 vocabulary words. Students at this level can discuss a wide range of topics and communicate fluently with native Chinese speakers.
+    system_prompt = f"""You are a Chinese language simplification expert. Your task is to simplify Chinese text to {level_desc} vocabulary level.
 
 Instructions:
-1. Identify any words or phrases above HSK 4 level (HSK 5, HSK 6, or non-HSK vocabulary)
-2. Replace them with simpler HSK 4 or below equivalents that preserve the meaning
+1. Identify any words or phrases above {level_desc} level
+2. Replace them with simpler {level_desc} or below equivalents that preserve the meaning
 3. Keep the sentence structure natural and grammatically correct
 4. Preserve proper nouns, names, and places
 5. Preserve numbers and punctuation exactly
-6. If a word cannot be simplified without losing essential meaning, keep it but try to add context clues
+6. If a word cannot be simplified without losing essential meaning, keep it but try to add context clues{word_limit_instr}
 
 IMPORTANT: Output ONLY the simplified Chinese text. Do not include any explanations, notes, or English text."""
 
-    user_prompt = f"""Simplify this Chinese text to HSK 4 vocabulary level:
+    user_prompt = f"""Simplify this Chinese text to {level_desc} vocabulary level:
 
 {text}
 
 Remember: Output only the simplified Chinese text, nothing else."""
+
+    # Route to Anthropic direct API if applicable
+    if _is_anthropic_direct(model):
+        for attempt in range(max_retries):
+            try:
+                result = _call_anthropic_direct(
+                    model, system_prompt, user_prompt,
+                    max_tokens=len(text) * 3,
+                )
+                if result:
+                    return result
+                return text
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        f'Anthropic simplification error (attempt {attempt + 1}): {e}. '
+                        f'Retrying in {wait}s...'
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.error(f'Simplification failed after {max_retries} attempts: {e}')
+                    return f'[Simplification failed: {e}] {text}'
+        return text
+
+    # OpenRouter path
+    client = _create_client()
 
     for attempt in range(max_retries):
         try:
