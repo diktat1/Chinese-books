@@ -191,6 +191,7 @@ def process_epub(
     simplify_hsk4: bool = False,
     llm_model: str | None = None,
     progress_callback=None,
+    target_languages: list[str] | None = None,
 ) -> None:
     """
     Read an EPUB file, add pinyin annotations and/or English translations,
@@ -233,7 +234,13 @@ def process_epub(
     total = len(items)
 
     for idx, item in enumerate(items, 1):
-        logger.info(f'Processing chapter {idx}/{total}: {item.get_name()}')
+        # Rotate target language per chapter if target_languages is set
+        if target_languages:
+            chapter_target = target_languages[(idx - 1) % len(target_languages)]
+        else:
+            chapter_target = translation_target
+
+        logger.info(f'Processing chapter {idx}/{total}: {item.get_name()} (target={chapter_target})')
         if progress_callback:
             progress_callback(idx, total, f'Processing chapter {idx}/{total}')
 
@@ -243,7 +250,7 @@ def process_epub(
             add_pinyin=add_pinyin,
             add_translation=add_translation,
             translation_source=translation_source,
-            translation_target=translation_target,
+            translation_target=chapter_target,
             word_spacing=word_spacing,
             parallel_text=parallel_text,
             simplify_hsk4=simplify_hsk4,
