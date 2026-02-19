@@ -7,3 +7,6 @@ build/
 *.epub
 # Allow EPUBs in the input folder (for push-trigger workflow from iPhone)
 !input-epubs/*.epub
+
+# Neural TTS models (too large for git)
+models/
