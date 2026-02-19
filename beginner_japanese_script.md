@@ -8,7 +8,7 @@
 
 **N5 Validation:** 0 violations / 324 content tokens
 
-**Audio pattern:** Japanese -> pause -> Chinese -> pause -> Japanese (repeat)
+**Audio pattern per sentence:** JP -> 0.3s pause -> CN -> 0.3s pause -> JP (same sentence twice in Japanese, once in Chinese) -> 0.8s pause before next sentence
 
 ---
 
