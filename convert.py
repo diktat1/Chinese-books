@@ -176,6 +176,33 @@ Examples:
              '(e.g., fr,de,es,tr,pt,it). Overrides --target for audiobook.',
     )
 
+    # Chapter range selection
+    parser.add_argument(
+        '--chapter-start',
+        type=int,
+        default=0,
+        help='0-based index of first chapter to process (default: 0)',
+    )
+    parser.add_argument(
+        '--chapter-count',
+        type=int,
+        default=0,
+        help='Number of chapters to process (default: 0 = all remaining)',
+    )
+    parser.add_argument(
+        '--lang-start',
+        type=int,
+        default=0,
+        help='Language rotation offset index (default: 0)',
+    )
+
+    # Dual-ruby EPUB mode
+    parser.add_argument(
+        '--dual-ruby',
+        action='store_true',
+        help='EPUB mode: combined pinyin + per-character meaning annotations',
+    )
+
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
@@ -314,6 +341,9 @@ Examples:
         print(f'Output: {audio_output} (format auto-detected)')
         print(f'Mode:   Audiobook')
         print(f'Engine: {model_name}')
+        if args.chapter_start > 0 or args.chapter_count > 0:
+            end_ch = args.chapter_start + args.chapter_count if args.chapter_count > 0 else '...'
+            print(f'Chapters: {args.chapter_start}-{end_ch} (lang offset={args.lang_start})')
         if args.simplify_hsk4:
             s_name = MODELS[simplify_model]["name"] if simplify_model and simplify_model in MODELS else (simplify_model or model_name)
             print(f'Simplify: HSK {args.hsk_level} (model={s_name})')
@@ -338,6 +368,9 @@ Examples:
             hsk_level=args.hsk_level,
             max_sentence_words=args.max_sentence_words,
             simplify_model=simplify_model,
+            chapter_start=args.chapter_start,
+            chapter_count=args.chapter_count,
+            lang_start_index=args.lang_start,
         )
         print(f'\nAudiobook written to: {result}')
         return
@@ -385,6 +418,9 @@ Examples:
     if args.target_languages:
         epub_target_langs = [l.strip() for l in args.target_languages.split(',')]
 
+    # For EPUB, use translate_model if set (--translate-model), else fall back to llm_model
+    epub_model = translate_model or llm_model
+
     process_epub(
         input_path=str(input_path),
         output_path=str(output_path),
@@ -395,8 +431,12 @@ Examples:
         word_spacing=args.word_spacing,
         parallel_text=args.parallel_text,
         simplify_hsk4=args.simplify_hsk4,
-        llm_model=llm_model,
+        llm_model=epub_model,
         target_languages=epub_target_langs,
+        dual_ruby=args.dual_ruby,
+        chapter_start=args.chapter_start,
+        chapter_count=args.chapter_count,
+        lang_start_index=args.lang_start,
     )
 
     print(f'\nOutput written to: {output_path}')

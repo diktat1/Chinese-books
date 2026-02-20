@@ -7,3 +7,13 @@ build/
 *.epub
 # Allow EPUBs in the input folder (for push-trigger workflow from iPhone)
 !input-epubs/*.epub
+
+# Generated audiobook outputs
+*.m4b
+
+# OS files
+.DS_Store
+
+# Generated outputs
+beginner_japanese_ch1.epub
+beginner_japanese_script.json

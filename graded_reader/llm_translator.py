@@ -386,6 +386,104 @@ def translate_sentences_llm(
     return results
 
 
+def translate_words_in_context(
+    text: str,
+    target: str = 'English',
+    model: Optional[str] = None,
+    max_retries: int = 3,
+) -> dict[str, str]:
+    """
+    Translate Chinese words (jieba-segmented) in context via a single LLM call.
+
+    Given Chinese text, segments it into words with jieba, then asks the LLM
+    for contextual meanings of each unique word.
+
+    Args:
+        text: Chinese text to analyze.
+        target: Target language for meanings.
+        model: Model ID (OpenRouter or Anthropic).
+        max_retries: Retry attempts.
+
+    Returns:
+        Dict like {'如今': 'nowadays', '水平': 'level', '强调': 'emphasize', ...}
+    """
+    from .chinese_processing import segment_text, contains_chinese
+
+    # Segment text into words and collect unique Chinese words
+    words = segment_text(text)
+    unique_words = sorted(set(w for w in words if contains_chinese(w)))
+    if not unique_words:
+        return {}
+
+    target = _normalize_language(target)
+
+    if model is None:
+        from .models import TIER_DEFAULTS
+        model = TIER_DEFAULTS["standard"]
+
+    words_list = ', '.join(unique_words)
+
+    system_prompt = (
+        f"You are a Chinese-{target} dictionary expert. "
+        f"For each Chinese word or phrase, provide its meaning in {target} as used in the given context. "
+        f"Return ONLY a JSON object mapping each word to its short (1-3 word) {target} meaning. "
+        f"No markdown, no explanation, just the JSON object."
+    )
+    user_prompt = (
+        f"Context: {text}\n\n"
+        f"Words: {words_list}\n\n"
+        f"Return JSON mapping each word to its contextual {target} meaning."
+    )
+
+    import json as _json
+
+    use_anthropic = model and _is_anthropic_direct(model)
+
+    for attempt in range(max_retries):
+        try:
+            if use_anthropic:
+                content = _call_anthropic_direct(
+                    model, system_prompt, user_prompt,
+                    max_tokens=len(unique_words) * 40,
+                )
+            else:
+                client = _create_client()
+                completion = client.chat.completions.create(
+                    model=model,
+                    max_tokens=len(unique_words) * 40,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+                content = completion.choices[0].message.content
+
+            if not content:
+                continue
+
+            # Strip markdown code fences if present
+            content = content.strip()
+            if content.startswith('```'):
+                content = content.split('\n', 1)[-1]
+                if content.endswith('```'):
+                    content = content[:-3]
+                content = content.strip()
+
+            result = _json.loads(content)
+            if isinstance(result, dict):
+                return {k: v for k, v in result.items() if isinstance(k, str) and isinstance(v, str)}
+
+        except (_json.JSONDecodeError, Exception) as e:
+            if attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                logger.warning(f'Word translation attempt {attempt + 1} failed: {e}. Retrying in {wait}s...')
+                time.sleep(wait)
+            else:
+                logger.error(f'Word translation failed after {max_retries} attempts: {e}')
+
+    return {}
+
+
 def _split_text(text: str, max_size: int) -> list[str]:
     """
     Split text into chunks, preferring sentence boundaries.

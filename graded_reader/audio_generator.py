@@ -525,24 +525,37 @@ async def _generate_chunk_audio(
         logger.warning(f'Chinese TTS failed for "{chunk[:30]}...": {e}')
         return b''
 
-    # 2. Target language audio (if bilingual with translation)
-    if target_lang and translation and translation.strip():
-        if silence:
-            parts.append(silence)
-        try:
-            target_audio = await _synth(translation, target_lang)
-            parts.append(target_audio)
-        except Exception as e:
-            logger.warning(f'Target TTS failed: {e}')
-
-        # 3. Chinese audio again
-        if silence:
-            parts.append(silence)
-        try:
-            zh_audio_2 = await _synth(chunk, source_lang)
-            parts.append(zh_audio_2)
-        except Exception as e:
-            logger.warning(f'Chinese TTS (repeat) failed: {e}')
+    # 2. Target language audio (if bilingual mode)
+    if target_lang:
+        if not translation or not translation.strip():
+            logger.warning(f'Empty translation for chunk "{chunk[:30]}..." — using Chinese-only for this chunk')
+            # Still append silence + repeat Chinese so rhythm stays consistent
+            if silence:
+                parts.append(silence)
+            # Skip target audio but still repeat Chinese
+            if silence:
+                parts.append(silence)
+            try:
+                zh_audio_2 = await _synth(chunk, source_lang)
+                parts.append(zh_audio_2)
+            except Exception as e:
+                logger.warning(f'Chinese TTS (repeat) failed: {e}')
+        else:
+            # Normal triple pattern: ZH → silence → Target → silence → ZH
+            if silence:
+                parts.append(silence)
+            try:
+                target_audio = await _synth(translation, target_lang)
+                parts.append(target_audio)
+            except Exception as e:
+                logger.warning(f'Target TTS failed: {e}')
+            if silence:
+                parts.append(silence)
+            try:
+                zh_audio_2 = await _synth(chunk, source_lang)
+                parts.append(zh_audio_2)
+            except Exception as e:
+                logger.warning(f'Chinese TTS (repeat) failed: {e}')
 
     return b''.join(parts)
 
@@ -670,6 +683,9 @@ def generate_audiobook(
     hsk_level: str = '4',
     max_sentence_words: int = 0,
     simplify_model: str | None = None,
+    chapter_start: int = 0,
+    chapter_count: int = 0,
+    lang_start_index: int = 0,
 ) -> str:
     """
     Generate an audiobook from a Chinese EPUB with parallel processing.
@@ -711,6 +727,15 @@ def generate_audiobook(
     if not chapters:
         raise ValueError('No Chinese chapters found in the EPUB')
 
+    # Slice chapters if chapter_start/chapter_count specified
+    if chapter_start > 0 or chapter_count > 0:
+        end = chapter_start + chapter_count if chapter_count > 0 else len(chapters)
+        logger.info(f'Selecting chapters {chapter_start} to {end - 1} (0-based)')
+        chapters = chapters[chapter_start:end]
+        if not chapters:
+            raise ValueError(f'No chapters in range [{chapter_start}:{end}]')
+        logger.info(f'Processing {len(chapters)} chapters')
+
     # Extract cover image and metadata
     cover_image = _extract_cover_image(epub_path)
     if cover_image:
@@ -718,10 +743,10 @@ def generate_audiobook(
     else:
         logger.info('No cover image found')
 
-    # Assign target language per chapter (rotating)
+    # Assign target language per chapter (rotating with offset)
     chapter_langs = []
     for i in range(len(chapters)):
-        lang = target_languages[i % len(target_languages)]
+        lang = target_languages[(lang_start_index + i) % len(target_languages)]
         lang_name = _LANG_NAMES.get(lang, lang)
         chapter_langs.append(lang)
         logger.info(f'Chapter {i + 1}: {chapters[i][0]} [{lang_name}]')
@@ -733,7 +758,9 @@ def generate_audiobook(
     for title, paragraphs in chapters:
         chapter_chunks = []
         for para in paragraphs:
-            sub_chunks = _split_paragraph(para, max_sentences=4)
+            sub_chunks = split_sentences(para)
+            if not sub_chunks:
+                sub_chunks = [para]  # fallback for non-sentence text
             chapter_chunks.extend(sub_chunks)
         all_chunks.append(chapter_chunks)
         total_chunks += len(chapter_chunks)
@@ -905,6 +932,35 @@ def generate_audiobook(
     logger.info('Phase 4: TTS complete')
 
     # -----------------------------------------------------------------------
+    # Phase 4b: Translate chapter titles to English
+    # -----------------------------------------------------------------------
+    english_titles = {}
+    if llm_model:
+        from .llm_translator import translate_text_llm
+        logger.info('Translating chapter titles to English...')
+        for ch_idx, (title, _) in enumerate(chapters):
+            if contains_chinese(title):
+                try:
+                    en_title = translate_text_llm(
+                        title, source=translation_source, target='English',
+                        model=llm_model,
+                    )
+                    if en_title and not en_title.startswith('['):
+                        english_titles[ch_idx] = en_title
+                except Exception as e:
+                    logger.warning(f'Title translation failed for chapter {ch_idx}: {e}')
+    # Fallback: use pypinyin transliteration
+    if not english_titles:
+        try:
+            from pypinyin import pinyin as _pinyin, Style as _Style
+            for ch_idx, (title, _) in enumerate(chapters):
+                if contains_chinese(title):
+                    py = _pinyin(title, style=_Style.NORMAL)
+                    english_titles[ch_idx] = ' '.join(p[0] for p in py).title()
+        except ImportError:
+            pass
+
+    # -----------------------------------------------------------------------
     # Phase 5: Assemble output
     # -----------------------------------------------------------------------
     logger.info('Phase 5: Assembling audiobook...')
@@ -928,7 +984,7 @@ def generate_audiobook(
                 if not audio_data:
                     continue
 
-                title = chapters[ch_idx][0]
+                title = english_titles.get(ch_idx, chapters[ch_idx][0])
                 lang = chapter_langs[ch_idx]
                 lang_name = _LANG_NAMES.get(lang, lang)
 

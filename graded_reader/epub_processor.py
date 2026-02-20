@@ -15,6 +15,7 @@ warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 
 from .chinese_processing import (
     annotate_text,
+    annotate_text_dual_ruby,
     contains_chinese,
     split_sentences,
     text_to_spaced_chinese,
@@ -22,7 +23,7 @@ from .chinese_processing import (
 )
 from .translator import translate_text, translate_sentences
 from .llm_simplifier import simplify_to_hsk4, is_openrouter_available as is_simplifier_available
-from .llm_translator import translate_text_llm, translate_sentences_llm
+from .llm_translator import translate_text_llm, translate_sentences_llm, translate_words_in_context
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,13 @@ ruby {
 }
 
 rt {
-    font-size: 0.45em;
+    font-size: 0.55em;
     font-style: normal;
     font-weight: normal;
-    color: #888;
+    color: #666;
     ruby-align: center;
     letter-spacing: 0.02em;
+    line-height: 1.2;
 }
 
 rp {
@@ -50,12 +52,12 @@ rp {
 
 /* Base styling */
 body {
-    line-height: 2.0;
+    line-height: 2.8;
     font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", serif;
 }
 
 p {
-    line-height: 2.0;
+    line-height: 2.8;
     margin-bottom: 1em;
     text-align: justify;
 }
@@ -192,6 +194,10 @@ def process_epub(
     llm_model: str | None = None,
     progress_callback=None,
     target_languages: list[str] | None = None,
+    dual_ruby: bool = False,
+    chapter_start: int = 0,
+    chapter_count: int = 0,
+    lang_start_index: int = 0,
 ) -> None:
     """
     Read an EPUB file, add pinyin annotations and/or English translations,
@@ -230,13 +236,59 @@ def process_epub(
     book.add_item(css_item)
 
     # Process each HTML document in the book
-    items = list(book.get_items_of_type(9))  # 9 = ITEM_DOCUMENT
+    all_items = list(book.get_items_of_type(9))  # 9 = ITEM_DOCUMENT
+
+    # When chapter_start/chapter_count is specified, filter to "content chapters"
+    # using spine (reading) order with Chinese content detection — matching
+    # the audiobook extractor's chapter numbering exactly.
+    if chapter_start > 0 or chapter_count > 0:
+        # Get spine-ordered items (same order as audiobook extraction)
+        items_by_id = {}
+        for item in book.get_items():
+            items_by_id[item.get_id()] = item
+            items_by_id[item.get_name()] = item
+        spine_items = []
+        for entry in book.spine:
+            item_id = entry[0] if isinstance(entry, tuple) else entry
+            item = items_by_id.get(item_id)
+            if item and item.get_type() == 9:
+                spine_items.append(item)
+        if not spine_items:
+            spine_items = all_items
+
+        # Identify content chapters: items with Chinese paragraphs
+        from bs4 import BeautifulSoup as _BS
+        _BLOCKS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th',
+                    'blockquote', 'dt', 'dd', 'figcaption', 'div']
+        content_items = []
+        for item in spine_items:
+            html_raw = item.get_content().decode('utf-8', errors='replace')
+            soup_tmp = _BS(html_raw, 'lxml')
+            has_chinese_blocks = False
+            for block in soup_tmp.find_all(_BLOCKS):
+                if block.find(_BLOCKS):
+                    continue
+                text = block.get_text().strip()
+                if text and contains_chinese(text):
+                    has_chinese_blocks = True
+                    break
+            if has_chinese_blocks:
+                content_items.append(item)
+
+        end = chapter_start + chapter_count if chapter_count > 0 else len(content_items)
+        logger.info(f'Found {len(content_items)} content chapters, selecting [{chapter_start}:{end}]')
+        for i, it in enumerate(content_items[chapter_start:end]):
+            logger.info(f'  Chapter {i}: {it.get_name()}')
+        items = content_items[chapter_start:end]
+    else:
+        items = all_items
+
     total = len(items)
 
     for idx, item in enumerate(items, 1):
         # Rotate target language per chapter if target_languages is set
         if target_languages:
-            chapter_target = target_languages[(idx - 1) % len(target_languages)]
+            chapter_target = target_languages[(lang_start_index + idx - 1) % len(target_languages)]
         else:
             chapter_target = translation_target
 
@@ -245,6 +297,12 @@ def process_epub(
             progress_callback(idx, total, f'Processing chapter {idx}/{total}')
 
         content = item.get_content().decode('utf-8')
+
+        # Compute correct relative path from item location to CSS file
+        import posixpath
+        item_dir = posixpath.dirname(item.get_name())  # e.g. 'Text'
+        css_rel = posixpath.relpath('style/graded_reader.css', item_dir)  # e.g. '../style/graded_reader.css'
+
         processed = _process_html_content(
             content,
             add_pinyin=add_pinyin,
@@ -255,11 +313,18 @@ def process_epub(
             parallel_text=parallel_text,
             simplify_hsk4=simplify_hsk4,
             llm_model=llm_model,
+            dual_ruby=dual_ruby,
+            css_href=css_rel,
         )
         item.set_content(processed.encode('utf-8'))
 
-        # Link our CSS to this chapter
-        item.add_item(css_item)
+        # Link our CSS with correct relative path
+        # (ebooklib rebuilds <head> from self.links, so add_link is the right approach)
+        item.add_link(href=css_rel, rel='stylesheet', type='text/css')
+
+    # Translate TOC entries to English if we have an LLM
+    if llm_model:
+        _translate_toc_entries(book.toc, llm_model)
 
     # Fix TOC entries that may have None uid (ebooklib read/write roundtrip issue)
     _fix_toc_uids(book.toc)
@@ -282,6 +347,34 @@ def process_epub(
     logger.info(f'Writing output EPUB: {output_path}')
     epub.write_epub(output_path, book)
     logger.info('Done!')
+
+
+def _translate_toc_entries(toc, llm_model: str) -> None:
+    """Translate Chinese TOC entry titles to English using the LLM."""
+    for i, item in enumerate(toc):
+        if isinstance(item, tuple):
+            section, children = item
+            if hasattr(section, 'title') and section.title and contains_chinese(section.title):
+                try:
+                    en = translate_text_llm(
+                        section.title, source='zh-CN', target='English',
+                        model=llm_model,
+                    )
+                    if en and not en.startswith('['):
+                        section.title = en
+                except Exception as e:
+                    logger.warning(f'TOC title translation failed: {e}')
+            _translate_toc_entries(children, llm_model)
+        elif hasattr(item, 'title') and item.title and contains_chinese(item.title):
+            try:
+                en = translate_text_llm(
+                    item.title, source='zh-CN', target='English',
+                    model=llm_model,
+                )
+                if en and not en.startswith('['):
+                    item.title = en
+            except Exception as e:
+                logger.warning(f'TOC title translation failed: {e}')
 
 
 def _fix_toc_uids(toc, prefix='toc') -> None:
@@ -408,6 +501,8 @@ def _process_html_content(
     parallel_text: bool = False,
     simplify_hsk4: bool = False,
     llm_model: str | None = None,
+    dual_ruby: bool = False,
+    css_href: str = 'style/graded_reader.css',
 ) -> str:
     """
     Process a single HTML document: annotate Chinese text nodes with
@@ -421,16 +516,8 @@ def _process_html_content(
     """
     soup = BeautifulSoup(html, 'lxml')
 
-    # Inject our CSS link into <head>
-    head = soup.find('head')
-    if head:
-        link_tag = soup.new_tag(
-            'link',
-            rel='stylesheet',
-            type='text/css',
-            href='style/graded_reader.css',
-        )
-        head.append(link_tag)
+    # Note: CSS link is added via item.add_link() in process_epub(),
+    # because ebooklib rebuilds <head> from self.links on write.
 
     # Deduplicate images within this HTML document
     # (some EPUBs have the same image referenced multiple times)
@@ -447,27 +534,70 @@ def _process_html_content(
 
     block_tags = soup.find_all(_ALL_BLOCKS)
 
+    # Collect Chinese blocks for processing
+    chinese_blocks = []
     for block in block_tags:
-        # Skip any block that has nested block children — those children
-        # will be processed on their own pass through the loop.
         if block.find(_ALL_BLOCKS):
             continue
-
         plain_text = block.get_text()
         if not contains_chinese(plain_text):
             continue
+        chinese_blocks.append((block, plain_text))
 
-        # Apply HSK 4 simplification if enabled
-        if simplify_hsk4:
-            simplified_text = simplify_to_hsk4(plain_text, model=llm_model)
-            if simplified_text and not simplified_text.startswith('['):
-                # Update the block content with simplified text
+    # Phase 1: HSK simplification (sequential — each depends on the result)
+    if simplify_hsk4:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        simplified_texts = [None] * len(chinese_blocks)
+
+        def _simplify(idx, text):
+            result = simplify_to_hsk4(text, model=llm_model)
+            return idx, result
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_simplify, i, text) for i, (_, text) in enumerate(chinese_blocks)]
+            for future in as_completed(futures):
+                idx, simplified = future.result()
+                if simplified and not simplified.startswith('['):
+                    simplified_texts[idx] = simplified
+
+        # Apply simplification results
+        for i, (block, _) in enumerate(chinese_blocks):
+            if simplified_texts[i]:
                 block.clear()
-                block.string = simplified_text
-                plain_text = simplified_text
+                block.string = simplified_texts[i]
+                chinese_blocks[i] = (block, simplified_texts[i])
 
-        if parallel_text and add_translation:
-            # Two-column parallel text layout
+    # Phase 2: Dual-ruby word translation (parallel API calls)
+    if dual_ruby and llm_model:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _translate_words(idx, text):
+            try:
+                return idx, translate_words_in_context(
+                    text, target=translation_target, model=llm_model,
+                )
+            except Exception as e:
+                logger.warning(f'Word translation failed for block {idx}: {e}')
+                return idx, {}
+
+        block_meanings = [{}] * len(chinese_blocks)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_translate_words, i, text) for i, (_, text) in enumerate(chinese_blocks)]
+            for future in as_completed(futures):
+                idx, meanings = future.result()
+                block_meanings[idx] = meanings
+
+        # Apply dual-ruby annotations with pre-fetched meanings
+        for i, (block, _) in enumerate(chinese_blocks):
+            _annotate_block_dual_ruby(block, soup, block_meanings[i], word_spacing=word_spacing)
+
+    elif dual_ruby:
+        # Dual-ruby without LLM — pinyin only
+        for block, _ in chinese_blocks:
+            _annotate_block_dual_ruby(block, soup, {}, word_spacing=word_spacing)
+
+    elif parallel_text and add_translation:
+        for block, plain_text in chinese_blocks:
             _process_block_parallel_text(
                 block, soup, plain_text,
                 add_pinyin=add_pinyin,
@@ -476,8 +606,8 @@ def _process_html_content(
                 llm_model=llm_model,
                 word_spacing=word_spacing,
             )
-        else:
-            # Standard ruby annotation format
+    else:
+        for block, plain_text in chinese_blocks:
             if add_pinyin:
                 _annotate_block(block, soup, word_spacing=word_spacing)
 
@@ -523,6 +653,37 @@ def _annotate_block(block: Tag, soup: BeautifulSoup, word_spacing: bool = False)
             continue
 
         # Parse the annotated HTML and replace the text node
+        new_content = BeautifulSoup(annotated_html, 'html.parser')
+        text_node.replace_with(new_content)
+
+
+def _annotate_block_dual_ruby(
+    block: Tag,
+    soup: BeautifulSoup,
+    meanings: dict[str, str],
+    word_spacing: bool = False,
+) -> None:
+    """
+    Walk through text nodes in a block and replace Chinese text with
+    dual-ruby HTML (pinyin + meaning in a single <rt>).
+    """
+    text_nodes = []
+    for descendant in block.descendants:
+        if isinstance(descendant, NavigableString) and not isinstance(
+            descendant, (type(soup.new_string('')).__class__,)
+        ):
+            if descendant.parent.name not in ('rt', 'rp', 'ruby', 'script', 'style'):
+                text_nodes.append(descendant)
+
+    for text_node in text_nodes:
+        original = str(text_node)
+        if not contains_chinese(original):
+            continue
+
+        annotated_html = annotate_text_dual_ruby(original, meanings, word_spacing=word_spacing)
+        if annotated_html == original:
+            continue
+
         new_content = BeautifulSoup(annotated_html, 'html.parser')
         text_node.replace_with(new_content)
 

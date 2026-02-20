@@ -91,6 +91,43 @@ def word_to_ruby_html(word: str) -> str:
     return ''.join(result)
 
 
+def word_to_dual_ruby_html(word: str, word_meaning: str = '') -> str:
+    """
+    Convert a Chinese word to HTML with pinyin ruby on every character
+    and the word-level meaning shown above the word using nested ruby.
+
+    Uses nested ruby for cross-platform stacking (works on Kindle + Apple Books):
+        <ruby><ruby>char<rt>pinyin</rt></ruby><rt>meaning</rt></ruby>
+
+    Layout (top to bottom): meaning / pinyin / character
+    Meaning spans the entire word; pinyin is per-character.
+
+    Args:
+        word: The Chinese word to annotate.
+        word_meaning: Contextual meaning for the whole word (e.g., 'level' for 水平).
+    """
+    if not contains_chinese(word):
+        return word
+
+    # Build inner ruby: each character with its pinyin
+    inner_parts = []
+    for char in word:
+        if is_chinese_char(char):
+            py = pinyin(char, style=Style.TONE, heteronym=False)
+            py_str = py[0][0] if py and py[0] else ''
+            inner_parts.append(f'<ruby>{char}<rp>(</rp><rt>{py_str}</rt><rp>)</rp></ruby>')
+        else:
+            inner_parts.append(char)
+
+    inner_html = ''.join(inner_parts)
+
+    if word_meaning:
+        # Wrap with outer ruby for word-level meaning
+        return f'<ruby>{inner_html}<rp>(</rp><rt>{word_meaning}</rt><rp>)</rp></ruby>'
+    else:
+        return inner_html
+
+
 def annotate_text(text: str, word_spacing: bool = False) -> str:
     """
     Take a plain Chinese text string and return HTML with ruby pinyin
@@ -128,6 +165,42 @@ def annotate_text(text: str, word_spacing: bool = False) -> str:
             result.append(f'<span class="cw">{word_to_ruby_html(word)}</span>')
         else:
             result.append(word_to_ruby_html(word))
+        prev_was_chinese = word_is_chinese
+
+    return ''.join(result)
+
+
+def annotate_text_dual_ruby(
+    text: str,
+    meanings: dict[str, str] | None = None,
+    word_spacing: bool = False,
+) -> str:
+    """
+    Annotate Chinese text with dual ruby (pinyin + word-level meaning).
+
+    meanings maps jieba-segmented words → contextual translation.
+    Word meaning is shown above the first character of each word;
+    remaining characters get pinyin only.
+    Always adds spaces between words for readability.
+    """
+    if not contains_chinese(text):
+        return text
+
+    words = segment_text(text)
+    meanings = meanings or {}
+
+    result = []
+    prev_was_chinese = False
+    for word in words:
+        word_is_chinese = contains_chinese(word)
+        if prev_was_chinese and word_is_chinese:
+            # Visible thin space between words for readability
+            result.append(' ')
+        if word_is_chinese:
+            word_meaning = meanings.get(word, '')
+            result.append(word_to_dual_ruby_html(word, word_meaning))
+        else:
+            result.append(word)
         prev_was_chinese = word_is_chinese
 
     return ''.join(result)
