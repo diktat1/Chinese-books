@@ -17,3 +17,6 @@ build/
 # Generated outputs
 beginner_japanese_ch1.epub
 beginner_japanese_script.json
+
+# Neural TTS models (too large for git)
+models/
