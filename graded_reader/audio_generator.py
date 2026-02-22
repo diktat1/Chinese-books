@@ -492,6 +492,67 @@ def _get_silence() -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Proper MP3 segment merging via ffmpeg
+# ---------------------------------------------------------------------------
+
+def _ffmpeg_concat_segments(segments: list[bytes]) -> bytes:
+    """
+    Properly concatenate MP3 audio segments using ffmpeg concat demuxer.
+
+    Instead of raw byte concatenation (which causes frame boundary issues,
+    audio spillover, and duration mismatches), this writes each segment to
+    a temp file and uses ffmpeg to cleanly re-mux them into a single MP3.
+
+    Args:
+        segments: List of MP3 byte segments to merge.
+
+    Returns:
+        Properly merged MP3 bytes.
+    """
+    if not segments:
+        return b''
+    if len(segments) == 1:
+        return segments[0]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        # Write each segment to a temp file
+        concat_lines = []
+        for i, seg in enumerate(segments):
+            seg_path = tmpdir_path / f'seg_{i:05d}.mp3'
+            seg_path.write_bytes(seg)
+            escaped = str(seg_path).replace("'", "'\\''")
+            concat_lines.append(f"file '{escaped}'")
+
+        concat_file = tmpdir_path / 'concat.txt'
+        concat_file.write_text('\n'.join(concat_lines))
+
+        output_path = tmpdir_path / 'merged.mp3'
+
+        result = subprocess.run(
+            [
+                'ffmpeg', '-y',
+                '-f', 'concat', '-safe', '0',
+                '-i', str(concat_file),
+                '-c:a', 'libmp3lame', '-b:a', '64k',
+                '-write_xing', '0',  # Avoid VBR header that can cause seek issues
+                str(output_path),
+            ],
+            capture_output=True,
+        )
+
+        if result.returncode != 0:
+            logger.warning(
+                f'ffmpeg concat failed (rc={result.returncode}), '
+                f'falling back to raw concatenation'
+            )
+            return b''.join(segments)
+
+        return output_path.read_bytes()
+
+
+# ---------------------------------------------------------------------------
 # Chunk-level audio generation (Chinese -> Target -> Chinese)
 # ---------------------------------------------------------------------------
 
@@ -501,12 +562,15 @@ async def _generate_chunk_audio(
     target_lang: str | None = None,
     translation: str | None = None,
     tts_semaphore: asyncio.Semaphore | None = None,
-) -> bytes:
+) -> list[bytes]:
     """
-    Generate audio for one text chunk with triple narration pattern.
+    Generate audio segments for one text chunk with triple narration pattern.
 
     Pattern: Chinese -> Target language -> Chinese
     With 0.3s silence gaps between segments.
+
+    Returns a list of individual MP3 byte segments (not concatenated)
+    so they can be properly merged with ffmpeg at the chapter level.
     """
     parts = []
     silence = _get_silence()
@@ -523,7 +587,7 @@ async def _generate_chunk_audio(
         parts.append(zh_audio)
     except Exception as e:
         logger.warning(f'Chinese TTS failed for "{chunk[:30]}...": {e}')
-        return b''
+        return []
 
     # 2. Target language audio (if bilingual mode)
     if target_lang:
@@ -557,7 +621,7 @@ async def _generate_chunk_audio(
             except Exception as e:
                 logger.warning(f'Chinese TTS (repeat) failed: {e}')
 
-    return b''.join(parts)
+    return parts
 
 
 # ---------------------------------------------------------------------------
@@ -894,7 +958,7 @@ def generate_audiobook(
     tts_semaphore = asyncio.Semaphore(10)
 
     async def _generate_chapter(ch_idx: int) -> tuple[int, bytes]:
-        """Generate all audio for one chapter."""
+        """Generate all audio for one chapter, using ffmpeg to properly merge segments."""
         title = chapters[ch_idx][0]
         ch_chunks = all_chunks[ch_idx]
         ch_trans = all_translations[ch_idx]
@@ -906,19 +970,26 @@ def generate_audiobook(
             f'[{lang_name or "Chinese only"}] ({len(ch_chunks)} chunks)'
         )
 
-        parts = []
+        # Collect all individual audio segments (not concatenated)
+        all_segments: list[bytes] = []
         for ck_idx, chunk in enumerate(ch_chunks):
             trans = ch_trans[ck_idx] if ch_trans else None
-            audio = await _generate_chunk_audio(
+            segments = await _generate_chunk_audio(
                 chunk, translation_source,
                 target_lang=target_lang,
                 translation=trans,
                 tts_semaphore=tts_semaphore,
             )
-            if audio:
-                parts.append(audio)
+            all_segments.extend(segments)
 
-        return (ch_idx, b''.join(parts))
+        if not all_segments:
+            return (ch_idx, b'')
+
+        # Use ffmpeg concat to properly merge all segments into one clean MP3
+        chapter_audio = await asyncio.get_event_loop().run_in_executor(
+            None, _ffmpeg_concat_segments, all_segments,
+        )
+        return (ch_idx, chapter_audio)
 
     async def _run_all_tts():
         tasks = [_generate_chapter(i) for i in range(len(chapters))]

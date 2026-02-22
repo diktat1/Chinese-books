@@ -203,6 +203,13 @@ Examples:
         help='EPUB mode: combined pinyin + per-character meaning annotations',
     )
 
+    # Interlinear EPUB mode
+    parser.add_argument(
+        '--interlinear',
+        action='store_true',
+        help='EPUB mode: sentence-by-sentence Chinese (with pinyin) + translation',
+    )
+
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
@@ -434,6 +441,7 @@ Examples:
         llm_model=epub_model,
         target_languages=epub_target_langs,
         dual_ruby=args.dual_ruby,
+        interlinear=args.interlinear,
         chapter_start=args.chapter_start,
         chapter_count=args.chapter_count,
         lang_start_index=args.lang_start,

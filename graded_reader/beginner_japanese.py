@@ -70,24 +70,24 @@ def _get_n5_words() -> set[str]:
 
 # Particles, grammatical elements, and basic forms always allowed
 _GRAMMAR_ALLOW = {
-    # Particles
+    # Particles (N5 only)
     'は', 'が', 'を', 'に', 'へ', 'で', 'と', 'も', 'の', 'か', 'ね', 'よ',
-    'から', 'まで', 'より', 'けど', 'けれど', 'けれども', 'ので', 'のに',
-    'な', 'ば', 'たら', 'なら',
+    'から', 'まで',
+    'な',
     # Copula and auxiliary forms
     'て', 'た', 'だ', 'です', 'ます', 'ません', 'ました', 'ませんでした',
-    'ない', 'なかった', 'でした', 'だった', 'である',
+    'ない', 'なかった', 'でした', 'だった',
     'たい', 'たかった', 'たくない',  # want to (verb+tai)
     'ん',  # contracted の
     # Core verbs (all conjugation forms)
-    'する', 'した', 'します', 'しました', 'して', 'される', 'し',
+    'する', 'した', 'します', 'しました', 'して', 'し',
     'ある', 'あった', 'あります', 'ありました', 'あって', 'あり',
     'いる', 'いた', 'います', 'いました', 'いて', 'い',
-    'なる', 'なった', 'なります', 'なりました', 'なって', 'なり', 'なら',
-    'れる', 'られる', 'せる', 'させる',
-    # Formal nouns and particles
-    'こと', 'もの', 'ところ', 'ため', 'よう', 'ほう',
-    'そう', 'よう', 'らしい', 'みたい',
+    'なる', 'なった', 'なります', 'なりました', 'なって', 'なり',
+    'れる',  # janome uses for basic verb stems
+    # Formal nouns (N5 only)
+    'こと', 'もの', 'ところ',
+    'そう',  # そうです (hearsay) is caught by _FORBIDDEN_GRAMMAR
     # Demonstratives
     'この', 'その', 'あの', 'どの',
     'これ', 'それ', 'あれ', 'どれ',
@@ -95,7 +95,7 @@ _GRAMMAR_ALLOW = {
     'こう', 'そう', 'ああ', 'どう',
     # Common adverbs
     'とても', 'たくさん', 'もっと', 'まだ', 'もう', 'すぐ',
-    'そして', 'しかし', 'でも', 'だから', 'それから',
+    'そして', 'でも', 'だから', 'それから',
     'ちょっと', 'すこし', 'ぜんぶ',
     # Honorific/common suffixes and compound starters
     'さん', 'さま', 'くん', 'ちゃん',
@@ -103,6 +103,27 @@ _GRAMMAR_ALLOW = {
     # Punctuation
     '。', '、', '！', '？', '「', '」', '（', '）',
 }
+
+# N4+ grammar patterns that should be flagged even if individual tokens pass
+_FORBIDDEN_GRAMMAR = [
+    (r'なければなりません', 'must (N4)'),
+    (r'なければならない', 'must (N4)'),
+    (r'なくてはいけません', 'must (N4)'),
+    (r'ことができ', 'can do (N4)'),
+    (r'について', 'about/regarding (N4)'),
+    (r'にとって', 'for/regarding (N3)'),
+    (r'ために', 'in order to (N4)'),
+    (r'ようにする', 'try to (N4)'),
+    (r'ようになる', 'come to (N4)'),
+    (r'かもしれません', 'might (N4)'),
+    (r'でしょう', 'probably (N4)'),
+    (r'ことがあります', 'sometimes (N4)'),
+    (r'ほうがいい', 'should (N4)'),
+    (r'そうです', 'looks like (N4)'),
+    (r'ながら', 'while doing (N4)'),
+    (r'ばいい', 'should (N4)'),
+    (r'たらいい', 'should (N4)'),
+]
 
 # Katakana proper nouns (foreign names, brands) are always allowed
 _KATAKANA_PATTERN = re.compile(r'^[ァ-ヶー・]+$')
@@ -188,11 +209,18 @@ def validate_n5(text: str) -> dict:
             'base_form': base,
         })
 
+    # Check for N4+ grammar patterns in the full text
+    grammar_violations = []
+    for pattern, label in _FORBIDDEN_GRAMMAR:
+        if re.search(pattern, text):
+            grammar_violations.append({'pattern': pattern, 'label': label})
+
     return {
-        'is_valid': len(violations) == 0,
+        'is_valid': len(violations) == 0 and len(grammar_violations) == 0,
         'total_tokens': total_tokens,
         'violations': violations,
         'violation_count': len(violations),
+        'grammar_violations': grammar_violations,
     }
 
 

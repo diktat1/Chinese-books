@@ -145,11 +145,11 @@ def _simplify_with_retry(
     word_limit_instr = ''
     if max_sentence_words > 0:
         word_limit_instr = (
-            f'\n7. Keep each sentence to approximately {max_sentence_words} '
+            f'\n10. Keep each sentence to approximately {max_sentence_words} '
             f'words or fewer. Split longer sentences into shorter ones.'
         )
 
-    system_prompt = f"""You are a Chinese language simplification expert. Your task is to simplify Chinese text to {level_desc} vocabulary level.
+    system_prompt = f"""You are a Chinese language simplification expert. Your task is to simplify Chinese text to {level_desc} vocabulary level while preserving the author's ideas.
 
 Instructions:
 1. Identify any words or phrases above {level_desc} level
@@ -157,15 +157,18 @@ Instructions:
 3. Keep the sentence structure natural and grammatically correct
 4. Preserve proper nouns, names, and places
 5. Preserve numbers and punctuation exactly
-6. If a word cannot be simplified without losing essential meaning, keep it but try to add context clues{word_limit_instr}
+6. If a word cannot be simplified without losing essential meaning, keep it but try to add context clues
+7. Add a space between each Chinese word (word segmentation). For example: "我 喜欢 学习 中文" instead of "我喜欢学习中文"
+8. NEVER remove or alter key concepts, metaphors, analogies, or technical terms from the original. If a concept like "10倍速因素" appears, keep it — simplify the surrounding grammar instead
+9. Preserve the author's analytical frameworks and reasoning. Replace difficult vocabulary only when meaning is fully preserved{word_limit_instr}
 
-IMPORTANT: Output ONLY the simplified Chinese text. Do not include any explanations, notes, or English text."""
+IMPORTANT: Output ONLY the simplified Chinese text with spaces between words. Do not include any explanations, notes, or English text."""
 
-    user_prompt = f"""Simplify this Chinese text to {level_desc} vocabulary level:
+    user_prompt = f"""Simplify this Chinese text to {level_desc} vocabulary level. Add a space between each word. Preserve all key concepts and technical terms:
 
 {text}
 
-Remember: Output only the simplified Chinese text, nothing else."""
+Remember: Output only the simplified Chinese text with word spacing, nothing else."""
 
     # Route to Anthropic direct API if applicable
     if _is_anthropic_direct(model):
@@ -238,6 +241,200 @@ Remember: Output only the simplified Chinese text, nothing else."""
         except Exception as e:
             logger.error(f'Unexpected error during simplification: {e}')
             return f'[Simplification error: {e}] {text}'
+
+    return text
+
+
+def verify_simplification(
+    original: str,
+    simplified: str,
+    model: Optional[str] = None,
+    max_retries: int = 3,
+) -> str:
+    """
+    Verify that a simplified text preserves all key concepts from the original.
+
+    Asks the LLM to compare original and simplified texts, and returns a
+    corrected version if key concepts were lost, or the simplified text as-is.
+
+    Args:
+        original: The original Chinese text before simplification.
+        simplified: The simplified Chinese text to verify.
+        model: Model ID for the verification call.
+        max_retries: Number of retry attempts on API failure.
+
+    Returns:
+        Corrected simplified text (with word spacing), or the original
+        simplified text if no issues were found.
+    """
+    if not original.strip() or not simplified.strip():
+        return simplified
+
+    if model is None:
+        from .models import TIER_DEFAULTS
+        model = TIER_DEFAULTS["premium"]
+
+    system_prompt = """You are a Chinese text quality reviewer. Compare an original Chinese text with its simplified version and check whether ALL key concepts, metaphors, technical terms, and meaning are preserved.
+
+If the simplified version is faithful, output it exactly as-is.
+If concepts were lost or distorted, output a CORRECTED version that:
+- Restores the lost concepts and terms
+- Keeps the grammar simple (HSK 4-5 level)
+- Maintains spaces between words (word segmentation)
+
+IMPORTANT: Output ONLY the final Chinese text with spaces between words. No explanations."""
+
+    user_prompt = f"""Original:
+{original}
+
+Simplified:
+{simplified}
+
+Does the simplified version preserve ALL key concepts? If not, output a corrected version. Output only Chinese text with word spacing."""
+
+    use_anthropic = model and _is_anthropic_direct(model)
+
+    if use_anthropic:
+        for attempt in range(max_retries):
+            try:
+                result = _call_anthropic_direct(
+                    model, system_prompt, user_prompt,
+                    max_tokens=len(simplified) * 3,
+                )
+                if result:
+                    return result
+                return simplified
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f'Verification error (attempt {attempt + 1}): {e}. Retrying in {wait}s...')
+                    time.sleep(wait)
+                else:
+                    logger.error(f'Verification failed after {max_retries} attempts: {e}')
+                    return simplified
+        return simplified
+
+    if not OPENROUTER_AVAILABLE:
+        return simplified
+
+    client = _create_client()
+
+    for attempt in range(max_retries):
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                max_tokens=len(simplified) * 3,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            content = completion.choices[0].message.content
+            if content:
+                return content.strip()
+            return simplified
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                logger.warning(f'Verification error (attempt {attempt + 1}): {e}. Retrying in {wait}s...')
+                time.sleep(wait)
+            else:
+                logger.error(f'Verification failed after {max_retries} attempts: {e}')
+                return simplified
+
+    return simplified
+
+
+def add_word_spacing_llm(
+    text: str,
+    model: Optional[str] = None,
+    max_retries: int = 3,
+) -> str:
+    """
+    Add spaces between Chinese words using an LLM for word segmentation.
+
+    Unlike jieba-based segmentation, this uses the LLM's understanding of
+    context to produce more accurate word boundaries.
+
+    Args:
+        text: Chinese text without word spacing.
+        model: Model ID for the LLM call.
+        max_retries: Number of retry attempts on API failure.
+
+    Returns:
+        The same text with a single space between each Chinese word.
+        Returns original text on failure.
+    """
+    text = text.strip()
+    if not text:
+        return ''
+
+    if model is None:
+        from .models import TIER_DEFAULTS
+        model = TIER_DEFAULTS["standard"]
+
+    system_prompt = """You are a Chinese word segmentation expert. Add a single space between each Chinese word in the given text.
+
+Rules:
+- Do NOT change, add, or remove any characters
+- Only add spaces between words
+- Keep all punctuation in place
+- Proper nouns should be kept as single units
+- Output ONLY the spaced text, nothing else"""
+
+    user_prompt = f"""Add spaces between each Chinese word:
+
+{text}"""
+
+    use_anthropic = model and _is_anthropic_direct(model)
+
+    if use_anthropic:
+        for attempt in range(max_retries):
+            try:
+                result = _call_anthropic_direct(
+                    model, system_prompt, user_prompt,
+                    max_tokens=len(text) * 3,
+                )
+                if result:
+                    return result
+                return text
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f'Word spacing error (attempt {attempt + 1}): {e}. Retrying in {wait}s...')
+                    time.sleep(wait)
+                else:
+                    logger.error(f'Word spacing failed after {max_retries} attempts: {e}')
+                    return text
+        return text
+
+    if not OPENROUTER_AVAILABLE:
+        return text
+
+    client = _create_client()
+
+    for attempt in range(max_retries):
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                max_tokens=len(text) * 3,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            content = completion.choices[0].message.content
+            if content:
+                return content.strip()
+            return text
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                logger.warning(f'Word spacing error (attempt {attempt + 1}): {e}. Retrying in {wait}s...')
+                time.sleep(wait)
+            else:
+                logger.error(f'Word spacing failed after {max_retries} attempts: {e}')
+                return text
 
     return text
 

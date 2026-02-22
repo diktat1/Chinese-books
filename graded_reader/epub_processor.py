@@ -22,7 +22,12 @@ from .chinese_processing import (
     text_to_pinyin,
 )
 from .translator import translate_text, translate_sentences
-from .llm_simplifier import simplify_to_hsk4, is_openrouter_available as is_simplifier_available
+from .llm_simplifier import (
+    simplify_to_hsk4,
+    verify_simplification,
+    add_word_spacing_llm,
+    is_openrouter_available as is_simplifier_available,
+)
 from .llm_translator import translate_text_llm, translate_sentences_llm, translate_words_in_context
 
 logger = logging.getLogger(__name__)
@@ -52,21 +57,21 @@ rp {
 
 /* Base styling */
 body {
-    line-height: 2.8;
+    line-height: 2.2;
     font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", serif;
 }
 
 p {
-    line-height: 2.8;
-    margin-bottom: 1em;
+    line-height: 2.2;
+    margin-bottom: 0.6em;
     text-align: justify;
 }
 
 /* Headings */
 h1, h2, h3, h4, h5, h6 {
-    line-height: 2.0;
-    margin-top: 1.5em;
-    margin-bottom: 0.5em;
+    line-height: 1.8;
+    margin-top: 1.2em;
+    margin-bottom: 0.4em;
 }
 
 /* Lists */
@@ -161,6 +166,22 @@ blockquote {
     display: inline;
 }
 
+/* Interlinear sentence-by-sentence layout */
+.zh {
+    font-size: 1.1em;
+    line-height: 2.2;
+    margin-bottom: 0;
+    text-align: justify;
+}
+
+.tr {
+    font-size: 0.8em;
+    color: #999;
+    line-height: 1.4;
+    margin-top: 0.1em;
+    margin-bottom: 0.6em;
+}
+
 /* Dark mode support for e-readers that support it */
 @media (prefers-color-scheme: dark) {
     rt {
@@ -176,6 +197,9 @@ blockquote {
     }
     .parallel-table td.en-col {
         color: #bbb;
+    }
+    .tr {
+        color: #777;
     }
 }
 '''
@@ -195,6 +219,7 @@ def process_epub(
     progress_callback=None,
     target_languages: list[str] | None = None,
     dual_ruby: bool = False,
+    interlinear: bool = False,
     chapter_start: int = 0,
     chapter_count: int = 0,
     lang_start_index: int = 0,
@@ -314,6 +339,7 @@ def process_epub(
             simplify_hsk4=simplify_hsk4,
             llm_model=llm_model,
             dual_ruby=dual_ruby,
+            interlinear=interlinear,
             css_href=css_rel,
         )
         item.set_content(processed.encode('utf-8'))
@@ -340,6 +366,12 @@ def process_epub(
             item_name = item.get_name().replace('/', '_').replace('.', '_')
             item.set_id(f'item_{item_name}')
             logger.debug(f'Fixed missing ID for: {item.get_name()}')
+
+    # Split oversized XHTML files for Kindle compatibility (<250KB per file)
+    _split_oversized_items(book)
+
+    # Build a visible TOC page and ensure book.toc is correct
+    _build_toc_page(book)
 
     # Ensure EPUB3 navigation document exists (required for EPUB3 compliance)
     _ensure_nav_document(book)
@@ -417,6 +449,120 @@ def _deduplicate_items(book: epub.EpubBook) -> None:
             pass
 
 
+def _build_toc_page(book: epub.EpubBook) -> None:
+    """
+    Create a visible Table of Contents XHTML page and insert it at the
+    beginning of the spine.  Also ensures ``book.toc`` has correct ``href``
+    values so e-reader navigation menus work.
+    """
+    import posixpath
+
+    # --- Collect spine-ordered chapter items with titles ----------------------
+    items_by_id: dict[str, epub.EpubItem] = {}
+    for item in book.get_items():
+        items_by_id[item.get_id()] = item
+        items_by_id[item.get_name()] = item
+
+    chapters: list[tuple[str, str, str]] = []  # (title, href, item_id)
+    for entry in book.spine:
+        sp_id = entry[0] if isinstance(entry, tuple) else entry
+        sp_linear = entry[1] if isinstance(entry, tuple) and len(entry) > 1 else 'yes'
+        if sp_linear == 'no':
+            continue
+        item = items_by_id.get(sp_id)
+        if not item or item.get_type() != 9:
+            continue
+
+        # Try to extract a title from the chapter HTML
+        raw = item.get_content().decode('utf-8', errors='replace')
+        title = None
+        soup_tmp = BeautifulSoup(raw, 'lxml')
+        for tag_name in ('h1', 'h2', 'h3'):
+            heading = soup_tmp.find(tag_name)
+            if heading:
+                title = heading.get_text(strip=True)
+                break
+        if not title:
+            # Fallback: use file name
+            title = posixpath.basename(item.get_name())
+
+        chapters.append((title, item.get_name(), item.get_id()))
+
+    if not chapters:
+        logger.debug('No chapters found for TOC page')
+        return
+
+    # --- Build the TOC XHTML page --------------------------------------------
+    toc_file_name = 'toc_page.xhtml'
+
+    lines = [
+        "<?xml version='1.0' encoding='utf-8'?>",
+        '<!DOCTYPE html>',
+        '<html xmlns="http://www.w3.org/1999/xhtml">',
+        '<head><title>Table of Contents</title>',
+        '<style>',
+        'body { font-family: sans-serif; padding: 1em; }',
+        'h1 { font-size: 1.4em; margin-bottom: 0.8em; }',
+        'ol { padding-left: 1.5em; }',
+        'li { margin-bottom: 0.5em; line-height: 1.6; }',
+        'a { text-decoration: none; color: #1a0dab; }',
+        '</style>',
+        '</head>',
+        '<body>',
+        '<h1>Table of Contents</h1>',
+        '<ol>',
+    ]
+
+    for title, href, _ in chapters:
+        rel_href = posixpath.relpath(href, posixpath.dirname(toc_file_name))
+        lines.append(f'<li><a href="{rel_href}">{title}</a></li>')
+
+    lines += ['</ol>', '</body>', '</html>']
+
+    toc_html = '\n'.join(lines)
+
+    toc_item = epub.EpubHtml(
+        uid='toc_page',
+        file_name=toc_file_name,
+        media_type='application/xhtml+xml',
+        content=toc_html.encode('utf-8'),
+    )
+    book.add_item(toc_item)
+
+    # Insert TOC page at the beginning of the spine
+    current_spine = list(book.spine) if book.spine else []
+    book.spine = [('toc_page', 'yes')] + current_spine
+
+    # --- Fix book.toc so e-reader chapter menus work -------------------------
+    if not book.toc:
+        book.toc = []
+        for title, href, _ in chapters:
+            book.toc.append(epub.Link(href, title, f'toc_{href}'))
+        logger.info(f'Built book.toc with {len(book.toc)} entries')
+    else:
+        # Ensure existing TOC entries have valid hrefs
+        _fix_toc_hrefs(book.toc, items_by_id)
+
+    logger.info(f'Created TOC page with {len(chapters)} chapters')
+
+
+def _fix_toc_hrefs(toc, items_by_id: dict) -> None:
+    """Ensure TOC Link entries point to valid chapter files."""
+    for i, item in enumerate(toc):
+        if isinstance(item, tuple):
+            section, children = item
+            _fix_toc_hrefs(children, items_by_id)
+        elif hasattr(item, 'href') and item.href:
+            # Strip any fragment
+            base_href = item.href.split('#')[0]
+            if base_href not in items_by_id:
+                # Try to find the item by partial match
+                for name in items_by_id:
+                    if name.endswith(base_href) or base_href.endswith(name):
+                        item.href = name
+                        break
+
+
 def _ensure_nav_document(book: epub.EpubBook) -> None:
     """
     Ensure the book has an EPUB3 navigation document.
@@ -449,6 +595,146 @@ def _ensure_nav_document(book: epub.EpubBook) -> None:
 
     # Insert nav at the beginning with linear='no' to hide it from reading order
     book.spine = [('nav', 'no')] + current_spine
+
+
+MAX_XHTML_BYTES = 240_000  # Kindle limit ~300KB; leave margin
+
+
+def _split_oversized_items(book: epub.EpubBook) -> None:
+    """
+    Split XHTML items that exceed MAX_XHTML_BYTES into multiple smaller files.
+    Updates the book's manifest and spine so readers see the parts in order.
+    """
+    # Build spine item-id list for ordered insertion
+    spine_ids = [entry[0] if isinstance(entry, tuple) else entry for entry in book.spine]
+
+    items_by_id = {}
+    for item in book.get_items():
+        items_by_id[item.get_id()] = item
+
+    new_spine = []
+    for sp_entry in book.spine:
+        sp_id = sp_entry[0] if isinstance(sp_entry, tuple) else sp_entry
+        sp_linear = sp_entry[1] if isinstance(sp_entry, tuple) and len(sp_entry) > 1 else 'yes'
+        item = items_by_id.get(sp_id)
+
+        if not item or item.get_type() != 9:
+            new_spine.append(sp_entry)
+            continue
+
+        content = item.get_content()
+        if len(content) <= MAX_XHTML_BYTES:
+            new_spine.append(sp_entry)
+            continue
+
+        # This item needs splitting
+        html_str = content.decode('utf-8', errors='replace')
+        parts = _split_xhtml_body(html_str)
+
+        if len(parts) <= 1:
+            new_spine.append(sp_entry)
+            continue
+
+        logger.info(f'Splitting oversized file {item.get_name()} '
+                     f'({len(content)//1024}KB) into {len(parts)} parts')
+
+        base_name = item.get_name()
+        base_id = item.get_id()
+        # e.g. "Text/chapter001.xhtml" -> ("Text/chapter001", ".xhtml")
+        import posixpath
+        name_stem, name_ext = posixpath.splitext(base_name)
+
+        for pi, part_html in enumerate(parts):
+            part_bytes = part_html.encode('utf-8')
+            if pi == 0:
+                # Reuse the original item for part 0
+                item.set_content(part_bytes)
+                new_spine.append(sp_entry)
+            else:
+                part_name = f'{name_stem}_p{pi}{name_ext}'
+                part_id = f'{base_id}_p{pi}'
+                part_item = epub.EpubHtml(
+                    uid=part_id,
+                    file_name=part_name,
+                    media_type='application/xhtml+xml',
+                    content=part_bytes,
+                )
+                # Copy CSS links from original
+                if hasattr(item, 'links') and item.links:
+                    for link in item.links:
+                        part_item.add_link(**link) if isinstance(link, dict) else None
+                book.add_item(part_item)
+                new_spine.append((part_id, sp_linear))
+
+    book.spine = new_spine
+
+
+def _split_xhtml_body(html_str: str) -> list[str]:
+    """
+    Split an XHTML document's <body> content into multiple complete XHTML
+    documents, each under MAX_XHTML_BYTES.
+
+    Splits at block element boundaries (p, div, blockquote, table, h1-h6).
+    """
+    soup = BeautifulSoup(html_str, 'lxml')
+    body = soup.find('body')
+    if not body:
+        return [html_str]
+
+    # Extract the head section (everything before body)
+    head = soup.find('head')
+    head_str = str(head) if head else '<head></head>'
+
+    # Get the html tag attributes
+    html_tag = soup.find('html')
+    html_attrs = ''
+    if html_tag and html_tag.attrs:
+        html_attrs = ' '.join(f'{k}="{v}"' if not isinstance(v, list)
+                              else f'{k}="{" ".join(v)}"'
+                              for k, v in html_tag.attrs.items())
+        html_attrs = ' ' + html_attrs
+
+    # Build the wrapper template
+    xml_decl = "<?xml version='1.0' encoding='utf-8'?>\n"
+    doctype = '<!DOCTYPE html>\n' if '<!DOCTYPE' in html_str[:200] else ''
+    pre = f'{xml_decl}{doctype}<html{html_attrs}>\n{head_str}\n<body>\n'
+    post = '\n</body>\n</html>'
+    wrapper_size = len(pre.encode('utf-8')) + len(post.encode('utf-8'))
+    target_body_size = MAX_XHTML_BYTES - wrapper_size
+
+    # Collect top-level children of body as strings
+    children_strs = []
+    for child in body.children:
+        s = str(child)
+        if s.strip():
+            children_strs.append(s)
+
+    if not children_strs:
+        return [html_str]
+
+    # Greedily group children into parts
+    parts = []
+    current_children = []
+    current_size = 0
+
+    for cs in children_strs:
+        cs_size = len(cs.encode('utf-8'))
+        if current_size + cs_size > target_body_size and current_children:
+            # Flush current part
+            body_content = '\n'.join(current_children)
+            parts.append(f'{pre}{body_content}{post}')
+            current_children = [cs]
+            current_size = cs_size
+        else:
+            current_children.append(cs)
+            current_size += cs_size
+
+    # Flush remaining
+    if current_children:
+        body_content = '\n'.join(current_children)
+        parts.append(f'{pre}{body_content}{post}')
+
+    return parts
 
 
 def _deduplicate_html_images(soup: BeautifulSoup) -> None:
@@ -502,6 +788,7 @@ def _process_html_content(
     simplify_hsk4: bool = False,
     llm_model: str | None = None,
     dual_ruby: bool = False,
+    interlinear: bool = False,
     css_href: str = 'style/graded_reader.css',
 ) -> str:
     """
@@ -510,6 +797,9 @@ def _process_html_content(
 
     If parallel_text is True, uses two-column table layout with Chinese
     sentences on the left and translations on the right.
+
+    If interlinear is True, splits each paragraph into individual sentences
+    and creates alternating Chinese (with pinyin ruby) + translation paragraphs.
 
     If simplify_hsk4 is True, simplifies vocabulary to HSK 4 level before processing.
     If llm_model is set, uses that OpenRouter model instead of Google Translate.
@@ -544,10 +834,11 @@ def _process_html_content(
             continue
         chinese_blocks.append((block, plain_text))
 
-    # Phase 1: HSK simplification (sequential — each depends on the result)
+    # Phase 1: HSK simplification (parallel) + verification
     if simplify_hsk4:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         simplified_texts = [None] * len(chinese_blocks)
+        original_texts = [text for _, text in chinese_blocks]
 
         def _simplify(idx, text):
             result = simplify_to_hsk4(text, model=llm_model)
@@ -560,12 +851,52 @@ def _process_html_content(
                 if simplified and not simplified.startswith('['):
                     simplified_texts[idx] = simplified
 
-        # Apply simplification results
+        # Phase 1b: Verify simplifications preserve key concepts (parallel)
+        verified_texts = [None] * len(chinese_blocks)
+
+        def _verify(idx, original, simplified):
+            result = verify_simplification(original, simplified, model=llm_model)
+            return idx, result
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = []
+            for i, simplified in enumerate(simplified_texts):
+                if simplified:
+                    futures.append(pool.submit(_verify, i, original_texts[i], simplified))
+            for future in as_completed(futures):
+                idx, verified = future.result()
+                verified_texts[idx] = verified
+
+        # Apply verified simplification results
         for i, (block, _) in enumerate(chinese_blocks):
-            if simplified_texts[i]:
+            final = verified_texts[i] or simplified_texts[i]
+            if final:
                 block.clear()
-                block.string = simplified_texts[i]
-                chinese_blocks[i] = (block, simplified_texts[i])
+                block.string = final
+                chinese_blocks[i] = (block, final)
+
+    # Phase 1c: LLM word spacing for original (non-simplified) text
+    elif word_spacing and llm_model and interlinear:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        spaced_texts = [None] * len(chinese_blocks)
+
+        def _space(idx, text):
+            result = add_word_spacing_llm(text, model=llm_model)
+            return idx, result
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_space, i, text) for i, (_, text) in enumerate(chinese_blocks)]
+            for future in as_completed(futures):
+                idx, spaced = future.result()
+                if spaced:
+                    spaced_texts[idx] = spaced
+
+        # Apply spaced results
+        for i, (block, _) in enumerate(chinese_blocks):
+            if spaced_texts[i]:
+                block.clear()
+                block.string = spaced_texts[i]
+                chinese_blocks[i] = (block, spaced_texts[i])
 
     # Phase 2: Dual-ruby word translation (parallel API calls)
     if dual_ruby and llm_model:
@@ -595,6 +926,74 @@ def _process_html_content(
         # Dual-ruby without LLM — pinyin only
         for block, _ in chinese_blocks:
             _annotate_block_dual_ruby(block, soup, {}, word_spacing=word_spacing)
+
+    elif interlinear:
+        # Interlinear mode: sentence-by-sentence Chinese (pinyin) + translation
+        # Collect all sentences across all blocks for parallel translation
+        all_sentences = []
+        block_sentence_indices = []  # maps block index -> (start, end) in all_sentences
+        for i, (block, plain_text) in enumerate(chinese_blocks):
+            sents = split_sentences(plain_text)
+            if not sents:
+                sents = [plain_text.strip()]
+            start = len(all_sentences)
+            all_sentences.extend(sents)
+            block_sentence_indices.append((start, len(all_sentences)))
+
+        # Parallel translate all sentences
+        translations = [''] * len(all_sentences)
+        if llm_model and all_sentences:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _translate_sentence(idx, text):
+                try:
+                    result = translate_text_llm(
+                        text, source=translation_source,
+                        target=translation_target, model=llm_model,
+                    )
+                    if result and not result.startswith('[Translation'):
+                        return idx, result
+                    return idx, ''
+                except Exception as e:
+                    logger.warning(f'Interlinear translation failed for sentence {idx}: {e}')
+                    return idx, ''
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(_translate_sentence, i, s) for i, s in enumerate(all_sentences)]
+                for future in as_completed(futures):
+                    idx, tr = future.result()
+                    translations[idx] = tr
+
+        # Build interlinear HTML for each block
+        for i, (block, _) in enumerate(chinese_blocks):
+            start, end = block_sentence_indices[i]
+            sents = all_sentences[start:end]
+            sent_translations = translations[start:end]
+
+            # Build replacement: alternating zh/tr paragraphs
+            new_elements = []
+            for sent, tr in zip(sents, sent_translations):
+                # Chinese paragraph with pinyin (pass word_spacing so ruby respects word boundaries)
+                zh_html = annotate_text(sent, word_spacing=word_spacing)
+                zh_p = soup.new_tag('p')
+                zh_p['class'] = 'zh'
+                zh_content = BeautifulSoup(zh_html, 'html.parser')
+                for child in list(zh_content.children):
+                    zh_p.append(child.extract() if hasattr(child, 'extract') else NavigableString(str(child)))
+                new_elements.append(zh_p)
+
+                # Translation paragraph
+                if tr:
+                    tr_p = soup.new_tag('p')
+                    tr_p['class'] = 'tr'
+                    tr_p.string = tr
+                    new_elements.append(tr_p)
+
+            # Replace the original block with the interlinear elements
+            if new_elements:
+                for elem in new_elements:
+                    block.insert_before(elem)
+                block.decompose()
 
     elif parallel_text and add_translation:
         for block, plain_text in chinese_blocks:

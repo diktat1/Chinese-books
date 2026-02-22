@@ -42,10 +42,12 @@ SECTIONS = [
 
 
 def add_furigana_html(text: str) -> tuple[str, str]:
-    """Convert Japanese text to HTML with ruby annotations and romaji."""
+    """Convert Japanese text to HTML with ruby annotations and romaji.
+    Adds spaces between words for readability."""
     items = kks.convert(text)
     ruby_parts = []
     romaji_parts = []
+    _PUNCT = set('。、！？「」（）．，.!?,')
 
     for item in items:
         orig = item['orig']
@@ -53,6 +55,7 @@ def add_furigana_html(text: str) -> tuple[str, str]:
         hepburn = item['hepburn']
 
         has_kanji = any('\u4e00' <= c <= '\u9fff' for c in orig)
+        is_punct = all(c in _PUNCT or c.isspace() for c in orig)
 
         if has_kanji and hira != orig:
             ruby_parts.append(
@@ -61,10 +64,14 @@ def add_furigana_html(text: str) -> tuple[str, str]:
         else:
             ruby_parts.append(orig)
 
+        # Add word boundary space for readability
+        if not is_punct:
+            ruby_parts.append(' ')
+
         if hepburn and hepburn not in ('.', ',', '!', '?'):
             romaji_parts.append(hepburn)
 
-    return ''.join(ruby_parts), ' '.join(romaji_parts)
+    return ''.join(ruby_parts).strip(), ' '.join(romaji_parts)
 
 
 EPUB_CSS = '''
