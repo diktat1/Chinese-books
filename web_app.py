@@ -97,6 +97,7 @@ HTML_PAGE = '''
             display: none;
         }
         .output-btn.selected .check { display: block; }
+        .layout-btn.selected { border-color: #e74c3c !important; background: #fef5f5 !important; }
         /* Tier buttons */
         .tier-group { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
         .tier-btn {
@@ -312,19 +313,60 @@ HTML_PAGE = '''
             <option value="es">Spanish</option>
             <option value="it">Italian</option>
             <option value="pt">Portuguese</option>
+            <option value="tr">Turkish</option>
+            <option value="ru">Russian</option>
         </select>
     </div>
+    <div style="margin-bottom:10px">
+        <label style="font-size:.9em">Language rotation <span style="color:#aaa;font-size:.85em">(comma-separated, overrides target)</span></label>
+        <input type="text" id="optTargetLanguages" placeholder="e.g. pt,it,fr,de,es,tr" style="width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px;font-size:.95em;margin-top:4px">
+    </div>
     <hr>
-    <div class="opt-grid" id="epubOptions">
-        <label><input type="checkbox" id="optPinyin" checked> Pinyin annotations</label>
-        <label><input type="checkbox" id="optTranslation" checked> Translation</label>
-        <label><input type="checkbox" id="optWordSpacing"> Word spacing</label>
-        <label><input type="checkbox" id="optParallelText"> Parallel text</label>
+    <div id="epubOptions">
+        <div class="section-title" style="font-size:.82em;margin-bottom:6px">EPUB Layout</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+            <label style="flex:1;min-width:100px;padding:8px;border:2px solid #e0e0e0;border-radius:8px;text-align:center;cursor:pointer;font-size:.85em;transition:all .15s" class="layout-btn selected" data-layout="interlinear">
+                <input type="radio" name="layout" value="interlinear" checked style="display:none">
+                <b>Interlinear</b><br><span style="color:#999;font-size:.85em">Sentence-by-sentence</span>
+            </label>
+            <label style="flex:1;min-width:100px;padding:8px;border:2px solid #e0e0e0;border-radius:8px;text-align:center;cursor:pointer;font-size:.85em;transition:all .15s" class="layout-btn" data-layout="standard">
+                <input type="radio" name="layout" value="standard" style="display:none">
+                <b>Standard</b><br><span style="color:#999;font-size:.85em">Pinyin + translation</span>
+            </label>
+            <label style="flex:1;min-width:100px;padding:8px;border:2px solid #e0e0e0;border-radius:8px;text-align:center;cursor:pointer;font-size:.85em;transition:all .15s" class="layout-btn" data-layout="parallel_text">
+                <input type="radio" name="layout" value="parallel_text" style="display:none">
+                <b>Parallel</b><br><span style="color:#999;font-size:.85em">Two-column table</span>
+            </label>
+            <label style="flex:1;min-width:100px;padding:8px;border:2px solid #e0e0e0;border-radius:8px;text-align:center;cursor:pointer;font-size:.85em;transition:all .15s" class="layout-btn" data-layout="dual_ruby">
+                <input type="radio" name="layout" value="dual_ruby" style="display:none">
+                <b>Dual Ruby</b><br><span style="color:#999;font-size:.85em">Pinyin + meaning</span>
+            </label>
+        </div>
+        <div class="opt-grid">
+            <label><input type="checkbox" id="optPinyin" checked> Pinyin annotations</label>
+            <label><input type="checkbox" id="optTranslation" checked> Translation</label>
+            <label><input type="checkbox" id="optWordSpacing" checked> Word spacing</label>
+        </div>
     </div>
     <div class="opt-grid" id="hskOptions">
         <label><input type="checkbox" id="optSimplifyHsk4"> Simplify to HSK 4</label>
     </div>
-    <div class="opt-grid" id="audioOptions" style="display:none">
+    <hr>
+    <div style="display:flex;gap:12px;margin-top:6px" id="chapterRange">
+        <div style="flex:1">
+            <label style="font-size:.85em;color:#888">Chapter start</label>
+            <input type="number" id="optChapterStart" value="0" min="0" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:.9em">
+        </div>
+        <div style="flex:1">
+            <label style="font-size:.85em;color:#888">Chapter count <span style="color:#bbb">(0=all)</span></label>
+            <input type="number" id="optChapterCount" value="0" min="0" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:.9em">
+        </div>
+        <div style="flex:1">
+            <label style="font-size:.85em;color:#888">Lang offset</label>
+            <input type="number" id="optLangStart" value="0" min="0" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:.9em">
+        </div>
+    </div>
+    <div class="opt-grid" id="audioOptions" style="display:none;margin-top:8px">
         <label><input type="checkbox" id="optBilingual" checked> Bilingual narration</label>
     </div>
 </div>
@@ -867,16 +909,23 @@ $('convertBtn').onclick = async () => {
     $('downloadAllBtn').style.display = 'none';
 
     const formData = new FormData();
+    const layoutSel = document.querySelector('.layout-btn.selected');
+    const layout = layoutSel ? layoutSel.dataset.layout : 'interlinear';
+
     formData.append('file', selectedFile);
     formData.append('outputs', JSON.stringify([...selected]));
     formData.append('target', $('optTarget').value);
+    formData.append('target_languages', $('optTargetLanguages').value.trim());
     formData.append('llm_model', selectedModel);
     formData.append('simplify_hsk4', $('optSimplifyHsk4').checked);
     formData.append('add_pinyin', $('optPinyin').checked);
     formData.append('add_translation', $('optTranslation').checked);
     formData.append('word_spacing', $('optWordSpacing').checked);
-    formData.append('parallel_text', $('optParallelText').checked);
+    formData.append('layout', layout);
     formData.append('bilingual', $('optBilingual').checked);
+    formData.append('chapter_start', $('optChapterStart').value || '0');
+    formData.append('chapter_count', $('optChapterCount').value || '0');
+    formData.append('lang_start', $('optLangStart').value || '0');
 
     try {
         // Step 1: Start the job
@@ -910,16 +959,18 @@ $('convertBtn').onclick = async () => {
 // Download All button
 $('downloadAllBtn').onclick = function() { if (activeJobId) triggerDownload(activeJobId, null); };
 
-// Parallel text requires translation
-$('optParallelText').addEventListener('change', function() {
-    if (this.checked && !$('optTranslation').checked) {
-        $('optTranslation').checked = true;
-    }
-});
-$('optTranslation').addEventListener('change', function() {
-    if (!this.checked && $('optParallelText').checked) {
-        $('optParallelText').checked = false;
-    }
+// Layout button selection
+document.querySelectorAll('.layout-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.layout-btn').forEach(b => {
+            b.classList.remove('selected');
+            b.style.borderColor = '#e0e0e0';
+            b.style.background = '#fff';
+        });
+        btn.classList.add('selected');
+        btn.style.borderColor = '#e74c3c';
+        btn.style.background = '#fef5f5';
+    });
 });
 
 // ============================================================
@@ -1065,6 +1116,12 @@ def _run_conversion(job_id, outputs_to_run=None):
                     simplify_hsk4=p['simplify_hsk4'],
                     llm_model=p['llm_model'] or None,
                     progress_callback=progress_cb,
+                    target_languages=p.get('target_languages'),
+                    dual_ruby=p.get('dual_ruby', False),
+                    interlinear=p.get('interlinear', False),
+                    chapter_start=p.get('chapter_start', 0),
+                    chapter_count=p.get('chapter_count', 0),
+                    lang_start_index=p.get('lang_start', 0),
                 )
                 out['file'] = (f'{orig_name}_graded.epub', epub_path)
 
@@ -1090,6 +1147,10 @@ def _run_conversion(job_id, outputs_to_run=None):
                     translation_target=p['target'],
                     bilingual=p['bilingual'],
                     llm_model=p['llm_model'] or None,
+                    target_languages=p.get('target_languages'),
+                    chapter_start=p.get('chapter_start', 0),
+                    chapter_count=p.get('chapter_count', 0),
+                    lang_start_index=p.get('lang_start', 0),
                 )
                 result_ext = Path(result_path).suffix
                 out['file'] = (f'{orig_name}_audiobook{result_ext}', result_path)
@@ -1131,14 +1192,29 @@ def convert():
 
     outputs = json.loads(request.form.get('outputs', '["epub"]'))
     target = request.form.get('target', 'en')
+    target_languages_raw = request.form.get('target_languages', '').strip()
     llm_model = request.form.get('llm_model', '').strip()
     simplify_hsk4 = request.form.get('simplify_hsk4', 'false') == 'true'
 
     add_pinyin = request.form.get('add_pinyin', 'true') == 'true'
     add_translation = request.form.get('add_translation', 'true') == 'true'
     word_spacing = request.form.get('word_spacing', 'false') == 'true'
-    parallel_text = request.form.get('parallel_text', 'false') == 'true'
+    layout = request.form.get('layout', 'interlinear')
     bilingual = request.form.get('bilingual', 'true') == 'true'
+
+    chapter_start = int(request.form.get('chapter_start', '0'))
+    chapter_count = int(request.form.get('chapter_count', '0'))
+    lang_start = int(request.form.get('lang_start', '0'))
+
+    # Parse target languages for rotation
+    target_languages = None
+    if target_languages_raw:
+        target_languages = [l.strip() for l in target_languages_raw.split(',') if l.strip()]
+
+    # Derive layout flags
+    interlinear = layout == 'interlinear'
+    parallel_text = layout == 'parallel_text'
+    dual_ruby = layout == 'dual_ruby'
 
     # HSK simplification always needs an LLM
     if simplify_hsk4 and not llm_model:
@@ -1177,13 +1253,19 @@ def convert():
         'orig_name': orig_name,
         'params': {
             'target': target,
+            'target_languages': target_languages,
             'add_pinyin': add_pinyin,
             'add_translation': add_translation,
             'word_spacing': word_spacing,
             'parallel_text': parallel_text,
+            'interlinear': interlinear,
+            'dual_ruby': dual_ruby,
             'bilingual': bilingual,
             'llm_model': llm_model,
             'simplify_hsk4': simplify_hsk4,
+            'chapter_start': chapter_start,
+            'chapter_count': chapter_count,
+            'lang_start': lang_start,
         },
         'outputs': {
             out: {'status': 'pending', 'progress': 0, 'message': '', 'file': None}

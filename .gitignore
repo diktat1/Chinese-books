@@ -20,3 +20,14 @@ beginner_japanese_script.json
 
 # Neural TTS models (too large for git)
 models/
+
+# Generated Kindle dictionary
+kindle-dictionary/
+
+# JSON cache data (large, user-specific)
+book_data/
+
+# Generated scripts
+beginner_japanese_full_script.json
+beginner_japanese_full_script_n5.json
+beginner_japanese_scripts/

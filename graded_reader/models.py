@@ -143,8 +143,8 @@ MODELS = {
 
 # Tier defaults — the recommended model for each tier
 TIER_DEFAULTS = {
-    "free": "deepseek/deepseek-r1:free",
-    "standard": "deepseek/deepseek-chat",
+    "free": "qwen/qwen3-235b-a22b-thinking-2507:free",
+    "standard": "qwen/qwen3-235b-a22b-2507",
     "premium": "anthropic/claude-sonnet-4-5",
 }
 

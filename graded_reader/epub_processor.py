@@ -57,21 +57,21 @@ rp {
 
 /* Base styling */
 body {
-    line-height: 2.2;
+    line-height: 1.9;
     font-family: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", serif;
 }
 
 p {
-    line-height: 2.2;
-    margin-bottom: 0.6em;
+    line-height: 1.9;
+    margin-bottom: 0.3em;
     text-align: justify;
 }
 
 /* Headings */
 h1, h2, h3, h4, h5, h6 {
-    line-height: 1.8;
-    margin-top: 1.2em;
-    margin-bottom: 0.4em;
+    line-height: 1.6;
+    margin-top: 1.0em;
+    margin-bottom: 0.3em;
 }
 
 /* Lists */
@@ -81,13 +81,13 @@ ul, ol {
 }
 
 li {
-    line-height: 2.0;
-    margin-bottom: 0.3em;
+    line-height: 1.8;
+    margin-bottom: 0.2em;
 }
 
 /* Blockquotes */
 blockquote {
-    line-height: 2.0;
+    line-height: 1.8;
     margin: 0.8em 0;
     padding-left: 1em;
     border-left: 3px solid #ddd;
@@ -169,17 +169,17 @@ blockquote {
 /* Interlinear sentence-by-sentence layout */
 .zh {
     font-size: 1.1em;
-    line-height: 2.2;
+    line-height: 1.9;
     margin-bottom: 0;
     text-align: justify;
 }
 
 .tr {
-    font-size: 0.8em;
+    font-size: 0.75em;
     color: #999;
-    line-height: 1.4;
-    margin-top: 0.1em;
-    margin-bottom: 0.6em;
+    line-height: 1.3;
+    margin-top: 0;
+    margin-bottom: 0.3em;
 }
 
 /* Dark mode support for e-readers that support it */
